@@ -1,7 +1,8 @@
 from zeroconf import Zeroconf, ServiceBrowser
-import time
+from threading import Event
 
 hub_url = "no url"
+hub_found = Event()
 
 def app_url():
     return hub_url
@@ -25,23 +26,30 @@ class MyListener:
                 url = f"http://{ip}:{info.port}"
                 print(url)
 
-                if name == "command-hub._http._tcp.local.":
+                if "command-hub" in name:
                     hub_url = url
+                    print(f"Set hub_url to {hub_url}")
+                    hub_found.set()
+
+    def remove_service(self, zc, type_, name):
+        pass
+
+    def update_service(self, zc, type_, name):
+        pass
 
 
-zeroconf = Zeroconf()
+def discover():
+    zc = Zeroconf()
+    ServiceBrowser(
+        zc,
+        "_http._tcp.local.",
+        MyListener()
+    )
+    print("Searching for local HTTP services...")
+    try:
+        hub_found.wait()
+    finally:
+        zc.close()
 
-browser = ServiceBrowser(
-    zeroconf,
-    "_http._tcp.local.",
-    MyListener()
-)
-
-print("Searching for local HTTP services...")
-
-try:
-    while True:
-        time.sleep(1)
-
-except KeyboardInterrupt:
-    zeroconf.close()
+# Run discovery once on import until the hub is found
+discover()
