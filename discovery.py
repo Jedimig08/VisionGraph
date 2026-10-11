@@ -1,8 +1,27 @@
 from zeroconf import Zeroconf, ServiceBrowser
 from threading import Event
+from pathlib import Path
 
 hub_url = "no url"
 hub_found = Event()
+LAST_HUB_FILE = Path.home() / ".config" / "visiongraph" / "last_hub_url"
+saved_url_selected = False
+
+
+def load_last_hub_url():
+    try:
+        url = LAST_HUB_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return url if url.startswith(("http://", "https://")) else None
+
+
+def remember_hub_url(url=None):
+    url = url or hub_url
+    if not url.startswith(("http://", "https://")):
+        return
+    LAST_HUB_FILE.parent.mkdir(parents=True, exist_ok=True)
+    LAST_HUB_FILE.write_text(url, encoding="utf-8")
 
 def app_url():
     return hub_url
@@ -39,6 +58,10 @@ class MyListener:
 
 
 def discover():
+    global hub_url, saved_url_selected
+    hub_url = "no url"
+    saved_url_selected = False
+    hub_found.clear()
     zc = Zeroconf()
     ServiceBrowser(
         zc,
@@ -51,5 +74,22 @@ def discover():
     finally:
         zc.close()
 
-# Run discovery once on import until the hub is found
-discover()
+
+def choose_hub():
+    global hub_url, saved_url_selected
+    saved_url = load_last_hub_url()
+    if saved_url:
+        try:
+            answer = input(f"Use last CommandHub URL {saved_url}? [Y/n]: ").strip().lower()
+        except EOFError:
+            answer = ""
+        if answer in ("", "y", "yes"):
+            hub_url = saved_url
+            saved_url_selected = True
+            print(f"Using saved CommandHub URL: {hub_url}")
+            return
+    discover()
+
+
+# Select a saved CommandHub or discover one before camera selection.
+choose_hub()

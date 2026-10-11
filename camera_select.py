@@ -24,8 +24,20 @@ _TYPE_SCORES = {
 def get_cameras():
     """Return the list of CameraInfo dicts reported by the CommandHub."""
     url = f"{discovery.app_url()}/api/cameras"
-    with urllib.request.urlopen(url, timeout=10) as response:
-        return json.load(response)
+    try:
+        with urllib.request.urlopen(url, timeout=10) as response:
+            cameras = json.load(response)
+    except (urllib.error.URLError, TimeoutError):
+        if not discovery.saved_url_selected:
+            raise
+        print("Saved CommandHub URL did not respond; searching for the hub...")
+        discovery.discover()
+        url = f"{discovery.app_url()}/api/cameras"
+        with urllib.request.urlopen(url, timeout=10) as response:
+            cameras = json.load(response)
+
+    discovery.remember_hub_url()
+    return cameras
 
 
 def score_camera(camera):
@@ -73,3 +85,31 @@ def choose_resolution(camera, width=MODERATE_WIDTH, height=MODERATE_HEIGHT):
     target = width * height
     best = min(resolutions, key=lambda res: abs(res["width"] * res["height"] - target))
     return best["width"], best["height"]
+
+
+def choose_resolution_steps(camera, width=MODERATE_WIDTH, height=MODERATE_HEIGHT):
+    """Return supported resolutions from best quality to lower quality."""
+    resolutions = camera.get("supportedResolutions", [])
+    if not resolutions:
+        return [(width, height)]
+
+    unique = sorted(
+        {
+            (int(res["width"]), int(res["height"]))
+            for res in resolutions
+            if int(res.get("width", 0)) > 0 and int(res.get("height", 0)) > 0
+        },
+        key=lambda res: res[0] * res[1],
+        reverse=True,
+    )
+
+    requested = (width, height)
+    if requested not in unique:
+        unique.append(requested)
+    unique = sorted(set(unique), key=lambda res: res[0] * res[1], reverse=True)
+    return unique
+
+
+def stream_url(camera, width=MODERATE_WIDTH, height=MODERATE_HEIGHT, fps=MODERATE_FPS):
+    """Build the camera stream URL for the selected camera and resolution."""
+    return f"{discovery.app_url()}/stream/{camera['id']}?res={width}x{height}&fps={fps}"
