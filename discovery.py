@@ -45,7 +45,8 @@ class MyListener:
                 url = f"http://{ip}:{info.port}"
                 print(url)
 
-                if "command-hub" in name:
+                normalized_name = name.casefold().replace("-", "")
+                if "commandhub" in normalized_name:
                     hub_url = url
                     print(f"Set hub_url to {hub_url}")
                     hub_found.set()
@@ -63,7 +64,7 @@ def discover():
     saved_url_selected = False
     hub_found.clear()
     zc = Zeroconf()
-    ServiceBrowser(
+    browser = ServiceBrowser(
         zc,
         "_http._tcp.local.",
         MyListener()
@@ -79,17 +80,8 @@ def choose_hub():
     global hub_url, saved_url_selected
     saved_url = load_last_hub_url()
     if saved_url:
-        try:
-            answer = input(f"Use last CommandHub URL {saved_url}? [Y/n]: ").strip().lower()
-        except EOFError:
-            answer = ""
-        if answer in ("", "y", "yes"):
-            hub_url = saved_url
-            saved_url_selected = True
-            print(f"Using saved CommandHub URL: {hub_url}")
-            return
+        hub_url = saved_url
+        saved_url_selected = True
+        print(f"Using saved CommandHub URL: {hub_url}")
+        return
     discover()
-
-
-# Select a saved CommandHub or discover one before camera selection.
-choose_hub()

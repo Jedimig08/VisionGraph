@@ -23,9 +23,10 @@ _TYPE_SCORES = {
 
 def get_cameras():
     """Return the list of CameraInfo dicts reported by the CommandHub."""
+    discovery.choose_hub()
     url = f"{discovery.app_url()}/api/cameras"
     try:
-        with urllib.request.urlopen(url, timeout=10) as response:
+        with urllib.request.urlopen(url, timeout=None) as response:
             cameras = json.load(response)
     except (urllib.error.URLError, TimeoutError):
         if not discovery.saved_url_selected:
@@ -33,7 +34,7 @@ def get_cameras():
         print("Saved CommandHub URL did not respond; searching for the hub...")
         discovery.discover()
         url = f"{discovery.app_url()}/api/cameras"
-        with urllib.request.urlopen(url, timeout=10) as response:
+        with urllib.request.urlopen(url, timeout=None) as response:
             cameras = json.load(response)
 
     discovery.remember_hub_url()
@@ -74,6 +75,39 @@ def select_camera(cameras=None):
     if not cameras:
         raise RuntimeError("CommandHub reported no cameras")
     return max(cameras, key=score_camera)
+
+
+def choose_starting_camera(cameras):
+    """Prompt for a camera, defaulting to the highest-scoring camera."""
+    if not cameras:
+        raise RuntimeError("CommandHub reported no cameras")
+
+    default_camera = select_camera(cameras)
+    print("Available cameras:")
+    for index, camera in enumerate(cameras, start=1):
+        details = " ".join(
+            value for value in (camera.get("facing"), camera.get("type")) if value
+        )
+        print(f"  {index}. {camera['id']} ({details})")
+
+    while True:
+        try:
+            choice = input(
+                f"Choose camera [1-{len(cameras)}, Enter for recommended "
+                f"{default_camera['id']}]: "
+            ).strip()
+        except EOFError:
+            return default_camera
+
+        if not choice:
+            return default_camera
+        try:
+            index = int(choice) - 1
+        except ValueError:
+            index = -1
+        if 0 <= index < len(cameras):
+            return cameras[index]
+        print(f"Enter a number from 1 to {len(cameras)}, or press Enter for the recommended camera.")
 
 
 def choose_resolution(camera, width=MODERATE_WIDTH, height=MODERATE_HEIGHT):
