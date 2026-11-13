@@ -11,7 +11,6 @@ import numpy as np
 
 EXPECTED_MARKER_IDS = (0, 1, 2, 3, 4)
 CALIBRATION_CORNER_IDS = (0, 1, 3, 2)
-CORNER_MARKER_EDGE_PADDING_PIXELS = 2
 OBSERVATION_WINDOW = 5
 MINIMUM_OBSERVATIONS = 3
 MEMORY_SECONDS = 2.0
@@ -278,10 +277,23 @@ class MarkerTracker:
         if any(corners is None for corners in marker_corners.values()):
             return
 
-        source = np.asarray(
+        surface_center = np.mean(
             [positions[marker_id] for marker_id in self.corner_ids],
-            dtype=np.float32,
+            axis=0,
         )
+        source = []
+        for marker_id in self.corner_ids:
+            marker_center = positions[marker_id]
+            outward_direction = marker_center - surface_center
+            vertices = np.asarray(
+                marker_corners[marker_id],
+                dtype=np.float32,
+            ).reshape(-1, 2)
+            outer_vertex = np.argmax(
+                (vertices - marker_center) @ outward_direction
+            )
+            source.append(vertices[outer_vertex])
+        source = np.asarray(source, dtype=np.float32)
         width, height = self.output_size
         destination_corners = [
             (0, 0),
@@ -299,33 +311,8 @@ class MarkerTracker:
         ):
             return
 
-        projected_marker_corners = self.cv2.perspectiveTransform(
-            np.asarray(
-                [marker_corners[marker_id] for marker_id in self.corner_ids],
-                dtype=np.float32,
-            ).reshape(-1, 1, 2),
-            homography,
-        ).reshape(-1, 2)
-        min_x, min_y = projected_marker_corners.min(axis=0)
-        max_x, max_y = projected_marker_corners.max(axis=0)
-        padding = CORNER_MARKER_EDGE_PADDING_PIXELS
-        left = padding + max(0, math.ceil(-float(min_x)))
-        top = padding + max(0, math.ceil(-float(min_y)))
-        right = padding + max(0, math.ceil(float(max_x) - (width - 1)))
-        bottom = padding + max(0, math.ceil(float(max_y) - (height - 1)))
-        translate = np.asarray(
-            [
-                [1, 0, left],
-                [0, 1, top],
-                [0, 0, 1],
-            ],
-            dtype=np.float64,
-        )
-        self.calibration = translate @ homography
-        self.calibration_output_size = (
-            width + left + right,
-            height + top + bottom,
-        )
+        self.calibration = homography
+        self.calibration_output_size = self.output_size
         self.calibration_sources = {
             marker_id: positions[marker_id].copy()
             for marker_id in self.calibration_ids

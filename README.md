@@ -35,18 +35,18 @@ the calibrated area, or `q` to quit. The calibrated area is shown by default.
 If the camera stream is temporarily unavailable, the client keeps retrying
 every three seconds and reconnects if the stream drops.
 At startup, enter the drawing-area width and height. The corrected image
-preserves their aspect ratio with its longest edge scaled to 1000 pixels, plus
-extra margins sized from the detected corner markers so their complete squares
-remain visible.
+preserves their aspect ratio with its longest edge scaled to 1000 pixels. The
+outward-facing corners of the four corner markers align exactly with the four
+corners of the corrected view.
 
 ## Marker Tracking and Calibration
 
 The client uses the `DICT_4X4_50` ArUco dictionary. IDs 0, 1, 3, and 2 define
-the surface corners clockwise from the top-left; the homography maps their
-centers to the corners of the measured drawing area. ID 4 is detected and
-tracked as an additional reference but is not assumed to be at the center or
-used to calculate the homography. Each corner marker must be consistently
-observed in at least 3 of the latest 5 frames.
+the surface corners clockwise from the top-left; the homography maps the
+outward-facing corner of each marker directly to a corner of the corrected
+view. ID 4 is detected and tracked as an additional reference but is not
+assumed to be at the center or used to calculate the homography. Each corner
+marker must be consistently observed in at least 3 of the latest 5 frames.
 
 Calibration observations are collected across frames, so all four corner
 markers do not need to appear together. Each incoming frame is warped to the

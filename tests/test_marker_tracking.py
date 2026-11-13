@@ -26,6 +26,21 @@ class MarkerTrackerTests(unittest.TestCase):
             dtype=np.float32,
         )
 
+    @classmethod
+    def outer_marker_corners(cls, centers, marker_ids=(0, 1, 3, 2)):
+        surface_center = np.mean(
+            [centers[marker_id] for marker_id in marker_ids],
+            axis=0,
+        )
+        outer_corners = []
+        for marker_id in marker_ids:
+            marker_center = np.asarray(centers[marker_id], dtype=np.float32)
+            vertices = cls.marker_corners(centers[marker_id]).reshape(-1, 2)
+            outward_direction = marker_center - surface_center
+            outer_index = np.argmax((vertices - marker_center) @ outward_direction)
+            outer_corners.append(vertices[outer_index])
+        return np.asarray(outer_corners, dtype=np.float32).reshape(-1, 1, 2)
+
     def frame_detections(self, marker_ids, centers=None):
         centers = centers or self.centers
         ids = np.asarray(marker_ids, dtype=np.int32).reshape(-1, 1)
@@ -60,33 +75,21 @@ class MarkerTrackerTests(unittest.TestCase):
             {0: 3, 1: 4, 2: 4, 3: 4, 4: 3},
         )
         self.assertNotIn(4, tracker.calibration_sources)
-        self.assertGreater(result.output_size[0], output_size[0])
-        self.assertGreater(result.output_size[1], output_size[1])
+        self.assertEqual(result.output_size, output_size)
 
-        source = np.asarray(
-            [[self.centers[marker_id]] for marker_id in (0, 1, 3, 2)],
-            dtype=np.float32,
-        )
-        mapped = cv2.perspectiveTransform(source, result.calibration).reshape(-1, 2)
+        mapped = cv2.perspectiveTransform(
+            self.outer_marker_corners(self.centers),
+            result.calibration,
+        ).reshape(-1, 2)
         np.testing.assert_allclose(
             mapped,
             [
-                mapped[0],
-                mapped[0] + [output_size[0] - 1, 0],
-                mapped[0] + [output_size[0] - 1, output_size[1] - 1],
-                mapped[0] + [0, output_size[1] - 1],
+                [0, 0],
+                [output_size[0] - 1, 0],
+                [output_size[0] - 1, output_size[1] - 1],
+                [0, output_size[1] - 1],
             ],
             atol=1,
-        )
-        self.assertGreaterEqual(mapped[0, 0], 0)
-        self.assertGreaterEqual(mapped[0, 1], 0)
-        self.assertLessEqual(
-            mapped[2, 0],
-            result.output_size[0] - 1,
-        )
-        self.assertLessEqual(
-            mapped[2, 1],
-            result.output_size[1] - 1,
         )
         source_corners = np.asarray(
             [
@@ -99,10 +102,10 @@ class MarkerTrackerTests(unittest.TestCase):
             source_corners,
             result.calibration,
         ).reshape(-1, 2)
-        self.assertTrue(np.all(mapped_corners[:, 0] >= 0))
-        self.assertTrue(np.all(mapped_corners[:, 0] < result.output_size[0]))
-        self.assertTrue(np.all(mapped_corners[:, 1] >= 0))
-        self.assertTrue(np.all(mapped_corners[:, 1] < result.output_size[1]))
+        self.assertTrue(np.all(mapped_corners[:, 0] >= -1e-4))
+        self.assertTrue(np.all(mapped_corners[:, 0] <= result.output_size[0] - 1 + 1e-4))
+        self.assertTrue(np.all(mapped_corners[:, 1] >= -1e-4))
+        self.assertTrue(np.all(mapped_corners[:, 1] <= result.output_size[1] - 1 + 1e-4))
 
     def test_output_size_scales_to_long_edge_and_preserves_aspect_ratio(self):
         self.assertEqual(marker_tracking.output_size_for_area(600, 400), (1000, 667))
@@ -233,21 +236,18 @@ class MarkerTrackerTests(unittest.TestCase):
             )
 
         self.assertTrue(result.calibrated)
-        source_centers = np.asarray(
-            [[skewed_centers[marker_id]] for marker_id in (0, 1, 3, 2)],
-            dtype=np.float32,
-        )
+        source_corners = self.outer_marker_corners(skewed_centers)
         mapped = cv2.perspectiveTransform(
-            source_centers,
+            source_corners,
             result.calibration,
         ).reshape(-1, 2)
         np.testing.assert_allclose(
             mapped,
             [
-                mapped[0],
-                mapped[0] + [output_size[0] - 1, 0],
-                mapped[0] + [output_size[0] - 1, output_size[1] - 1],
-                mapped[0] + [0, output_size[1] - 1],
+                [0, 0],
+                [output_size[0] - 1, 0],
+                [output_size[0] - 1, output_size[1] - 1],
+                [0, output_size[1] - 1],
             ],
             atol=1,
         )

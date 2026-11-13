@@ -198,7 +198,7 @@ def main():
     print(
         f"Drawing-area aspect ratio: {area_width:g}x{area_height:g}; "
         f"corrected area size: {output_size[0]}x{output_size[1]} pixels "
-        "(longest edge 1000 pixels, plus corner-marker margins)"
+        "(longest edge 1000 pixels)"
     )
     cameras = camera_select.get_cameras()
     camera = camera_select.choose_starting_camera(cameras)
@@ -322,7 +322,6 @@ def main():
                 frame,
                 result,
                 show_full_frame,
-                result.output_size,
             )
             view_label = (
                 "View: full camera frame"
