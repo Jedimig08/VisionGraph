@@ -46,7 +46,7 @@ def configure_aruco_params(cv2_module=cv2):
         "minMarkerPerimeterRate": 0.02,
         "maxMarkerPerimeterRate": 4.0,
         "polygonalApproxAccuracyRate": 0.03,
-        "errorCorrectionRate": 0.8,
+        "errorCorrectionRate": 0.5,
         "cornerRefinementMethod": aruco.CORNER_REFINE_SUBPIX,
         "cornerRefinementWinSize": 5,
         "cornerRefinementMaxIterations": 30,
