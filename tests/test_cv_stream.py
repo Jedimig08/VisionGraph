@@ -103,6 +103,23 @@ class MarkerIdMergeTests(unittest.TestCase):
         np.testing.assert_array_equal(corrected[3, 5], (255, 255, 255))
         self.assertEqual(corrected.shape, (12, 12, 3))
 
+    def test_pose_status_is_drawn_when_a_pose_is_supplied(self):
+        frame = np.zeros((2, 3, 3), dtype=np.uint8)
+        result = SimpleNamespace(calibration=None, output_size=(4, 2))
+        pose = SimpleNamespace(valid=False, reason="marker not detected live")
+        with (
+            mock.patch.object(cv_stream, "draw_tracking_status"),
+            mock.patch.object(cv_stream, "draw_pose_status") as draw_pose,
+        ):
+            display_frame = cv_stream.prepare_display_frame(
+                frame,
+                result,
+                show_full_frame=True,
+                pose=pose,
+            )
+
+        draw_pose.assert_called_once_with(display_frame, pose)
+
     def test_open_stream_retries_until_camera_is_available(self):
         unavailable_stream = mock.Mock()
         unavailable_stream.isOpened.return_value = False

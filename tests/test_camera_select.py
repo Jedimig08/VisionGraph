@@ -1,4 +1,5 @@
 import unittest
+import urllib.error
 from unittest import mock
 
 import camera_select
@@ -32,8 +33,60 @@ class CameraSelectTests(unittest.TestCase):
         choose_hub.assert_called_once_with()
         urlopen.assert_called_once_with(
             "http://hub.local/api/cameras",
-            timeout=None,
+            timeout=camera_select.HUB_HTTP_TIMEOUT_SECONDS,
         )
+
+    def test_unreachable_saved_hub_rediscovery_retries_until_reachable(self):
+        unreachable = urllib.error.URLError(OSError(113, "No route to host"))
+        response = mock.mock_open(read_data="[]").return_value
+        with (
+            mock.patch.object(camera_select.discovery, "choose_hub"),
+            mock.patch.object(camera_select.discovery, "app_url", return_value="http://hub.local"),
+            mock.patch.object(
+                camera_select.discovery,
+                "saved_url_selected",
+                True,
+            ),
+            mock.patch.object(
+                camera_select.urllib.request,
+                "urlopen",
+                side_effect=[unreachable, unreachable, response],
+            ) as urlopen,
+            mock.patch.object(camera_select.discovery, "discover") as discover,
+            mock.patch.object(camera_select.discovery, "remember_hub_url"),
+            mock.patch.object(camera_select.time, "sleep") as sleep,
+        ):
+            self.assertEqual(camera_select.get_cameras(), [])
+
+        self.assertEqual(urlopen.call_count, 3)
+        self.assertEqual(discover.call_count, 2)
+        sleep.assert_called_once_with(camera_select.HUB_RETRY_SECONDS)
+
+    def test_unreachable_discovered_hub_is_retried(self):
+        unreachable = urllib.error.URLError(OSError(113, "No route to host"))
+        response = mock.mock_open(read_data="[]").return_value
+        with (
+            mock.patch.object(camera_select.discovery, "choose_hub"),
+            mock.patch.object(camera_select.discovery, "app_url", return_value="http://hub.local"),
+            mock.patch.object(
+                camera_select.discovery,
+                "saved_url_selected",
+                False,
+            ),
+            mock.patch.object(
+                camera_select.urllib.request,
+                "urlopen",
+                side_effect=[unreachable, response],
+            ) as urlopen,
+            mock.patch.object(camera_select.discovery, "discover") as discover,
+            mock.patch.object(camera_select.discovery, "remember_hub_url"),
+            mock.patch.object(camera_select.time, "sleep") as sleep,
+        ):
+            self.assertEqual(camera_select.get_cameras(), [])
+
+        self.assertEqual(urlopen.call_count, 2)
+        discover.assert_called_once_with()
+        sleep.assert_not_called()
 
     def test_select_camera_prefers_back_wide_camera(self):
         cameras = [

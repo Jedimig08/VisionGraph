@@ -6,6 +6,7 @@ It only performs selection; the stream itself is opened in ``cv_stream``.
 """
 
 import json
+import time
 import urllib.request
 
 import discovery
@@ -13,6 +14,8 @@ import discovery
 MODERATE_FPS = 15
 MODERATE_WIDTH = 640
 MODERATE_HEIGHT = 480
+HUB_HTTP_TIMEOUT_SECONDS = 5.0
+HUB_RETRY_SECONDS = 3.0
 
 _TYPE_SCORES = {
     "UltraWide": 20,
@@ -21,21 +24,36 @@ _TYPE_SCORES = {
 }
 
 
+def _fetch_cameras(url):
+    with urllib.request.urlopen(url, timeout=HUB_HTTP_TIMEOUT_SECONDS) as response:
+        return json.load(response)
+
+
 def get_cameras():
     """Return the list of CameraInfo dicts reported by the CommandHub."""
     discovery.choose_hub()
     url = f"{discovery.app_url()}/api/cameras"
     try:
-        with urllib.request.urlopen(url, timeout=None) as response:
-            cameras = json.load(response)
-    except (urllib.error.URLError, TimeoutError):
-        if not discovery.saved_url_selected:
-            raise
-        print("Saved CommandHub URL did not respond; searching for the hub...")
-        discovery.discover()
-        url = f"{discovery.app_url()}/api/cameras"
-        with urllib.request.urlopen(url, timeout=None) as response:
-            cameras = json.load(response)
+        cameras = _fetch_cameras(url)
+    except (urllib.error.URLError, TimeoutError) as error:
+        source = "Saved" if discovery.saved_url_selected else "Discovered"
+        print(f"{source} CommandHub URL did not respond ({error}); searching for the hub...")
+        while True:
+            discovery.discover()
+            url = f"{discovery.app_url()}/api/cameras"
+            try:
+                cameras = _fetch_cameras(url)
+                break
+            except (urllib.error.URLError, TimeoutError) as error:
+                print(
+                    f"CommandHub was discovered at {url} but is not reachable "
+                    f"({error}).\n"
+                    "Check that the phone is on the same Wi-Fi, the CommandHub "
+                    "app is running, and VPN or guest-network isolation is not "
+                    f"blocking the connection. Retrying in {HUB_RETRY_SECONDS:g} "
+                    "seconds..."
+                )
+                time.sleep(HUB_RETRY_SECONDS)
 
     discovery.remember_hub_url()
     return cameras

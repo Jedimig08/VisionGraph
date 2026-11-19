@@ -11,6 +11,7 @@ import cv2
 import numpy as np
 import camera_select
 import marker_tracking
+import pose_estimator
 
 os.environ["QT_QPA_FONTDIR"] = "/usr/share/fonts"
 
@@ -174,7 +175,46 @@ def draw_tracking_status(frame, result, homography=None):
         )
 
 
-def prepare_display_frame(frame, result, show_full_frame):
+def draw_pose_status(frame, estimate):
+    if estimate is None:
+        return
+    if estimate.valid:
+        if estimate.refined:
+            corner_source = f"subpixel edges ({estimate.fit_error_px:.2f} px fit)"
+        else:
+            corner_source = f"raw ArUco corners ({estimate.refinement_reason})"
+        lines = [
+            (
+                f"Carriage: X={estimate.x_mm:.2f} mm  Y={estimate.y_mm:.2f} mm  "
+                f"angle={estimate.angle_deg:+.2f} deg"
+            ),
+            (
+                f"Carriage pixels: ({estimate.x_px:.1f}, {estimate.y_px:.1f})  "
+                f"reliability={estimate.reliability * 100:.0f}%"
+            ),
+            f"Corner source: {corner_source}",
+        ]
+        if not estimate.inside_drawing_area:
+            lines.append("Warning: carriage is outside the drawing area")
+        colour = (0, 255, 0)
+    else:
+        lines = [f"Carriage pose unavailable: {estimate.reason}"]
+        colour = (0, 0, 255)
+
+    for line_index, line in enumerate(lines):
+        cv2.putText(
+            frame,
+            line,
+            (20, 255 + line_index * 25),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            colour,
+            2,
+            cv2.LINE_AA,
+        )
+
+
+def prepare_display_frame(frame, result, show_full_frame, pose=None):
     homography = None
     if not show_full_frame and result.calibration is not None:
         homography = result.calibration
@@ -186,6 +226,7 @@ def prepare_display_frame(frame, result, show_full_frame):
     else:
         display_frame = frame.copy()
     draw_tracking_status(display_frame, result, homography)
+    draw_pose_status(display_frame, pose)
     return display_frame
 
 
@@ -210,6 +251,13 @@ def main():
 
     detector = marker_tracking.ArucoMarkerDetector()
     tracker = marker_tracking.MarkerTracker(output_size=output_size)
+    pose = pose_estimator.PoseEstimator(
+        pose_estimator.PoseEstimatorConfig(
+            drawing_width_mm=area_width,
+            drawing_height_mm=area_height,
+            output_size=output_size,
+        )
+    )
     stream_url = camera_select.stream_url(camera, width, height, requested_fps)
     print(
         f"Selected camera {camera['id']} "
@@ -237,6 +285,7 @@ def main():
                 cap.release()
                 cap = open_stream(stream_url)
                 tracker = marker_tracking.MarkerTracker(output_size=output_size)
+                pose.reset()
                 frame_times.clear()
                 now = time.monotonic()
                 last_fps_evaluation = now
@@ -263,6 +312,7 @@ def main():
                 frame.shape,
                 now=frame_time,
             )
+            pose_result = pose.update(result, frame=frame, now=frame_time)
 
             if not result.calibrated and frame_time - calibration_started >= CALIBRATION_RETRY_SECONDS:
                 if resolution_index > 0 and frame_time - last_resolution_retry >= CALIBRATION_RETRY_SECONDS:
@@ -278,6 +328,7 @@ def main():
                     )
                     cap = open_stream(stream_url)
                     tracker = marker_tracking.MarkerTracker(output_size=output_size)
+                    pose.reset()
                     frame_times.clear()
                     last_fps_evaluation = time.monotonic()
                     calibration_started = time.monotonic()
@@ -322,6 +373,7 @@ def main():
                 frame,
                 result,
                 show_full_frame,
+                pose_result,
             )
             view_label = (
                 "View: full camera frame"
@@ -365,6 +417,7 @@ def main():
                 show_full_frame = not show_full_frame
             if key == ord("r"):
                 tracker = marker_tracking.MarkerTracker(output_size=output_size)
+                pose.reset()
                 calibration_started = time.monotonic()
                 print("Cleared marker history; collecting calibration observations again")
     finally:
