@@ -5,9 +5,10 @@ This is the vision side of the polargraph pipeline.  It consumes the existing
 homography to marker 4's live corners, and reports the carriage centre and
 horizontal inclination in drawing-area millimetres and degrees.
 
-Only live, calibrated detections are accepted.  Remembered markers are
-deliberately ignored because a stale position must never drive a movement.
-This module does not command motors.
+Calibration and fresh detections are preferred.  A gated continuous track may
+substitute a predicted position only for a short, flagged grace period, so a
+stale position can never silently drive a movement.  This module does not
+command motors.
 """
 
 from __future__ import annotations
@@ -127,6 +128,8 @@ class PoseEstimatorConfig:
     angle_smoothing_window: int = 5
     angle_period_degrees: float = DEFAULT_ANGLE_PERIOD_DEGREES
     smoothing_reset_seconds: float = 0.5
+    allow_predicted_pose: bool = True
+    max_prediction_age_seconds: float = 0.3
     subpixel: subpixel_refiner.SubpixelRefinerConfig = field(
         default_factory=subpixel_refiner.SubpixelRefinerConfig
     )
@@ -155,6 +158,11 @@ class PoseEstimatorConfig:
             raise ValueError("Angle period must be a finite positive number")
         if float(self.smoothing_reset_seconds) < 0:
             raise ValueError("Smoothing reset interval cannot be negative")
+        if (
+            not math.isfinite(float(self.max_prediction_age_seconds))
+            or self.max_prediction_age_seconds < 0
+        ):
+            raise ValueError("Maximum prediction age cannot be negative")
         if not isinstance(self.subpixel, subpixel_refiner.SubpixelRefinerConfig):
             raise TypeError("subpixel must be a SubpixelRefinerConfig")
 
@@ -177,6 +185,8 @@ class PoseEstimate:
     refined: bool = False
     fit_error_px: float | None = None
     refinement_reason: str = ""
+    predicted: bool = False
+    prediction_age_seconds: float = 0.0
     corners_px: np.ndarray | None = field(default=None, repr=False)
 
 
@@ -243,17 +253,45 @@ class PoseEstimator:
         reliability_map = getattr(tracker_result, "reliability", {}) or {}
         reliability = float(reliability_map.get(marker_id, 0.0))
 
-        live = getattr(tracker_result, "live", {}) or {}
-        if marker_id not in live:
-            return self._reject("marker not detected live", reliability)
         if reliability < config.min_reliability:
             return self._reject("marker detection unreliable", reliability)
 
+        live = getattr(tracker_result, "live", {}) or {}
         live_corners = getattr(tracker_result, "live_corners", {}) or {}
-        if marker_id not in live_corners:
-            return self._reject("marker corners unavailable", reliability)
+        tracks = getattr(tracker_result, "tracks", None) or {}
+        track = tracks.get(marker_id) if hasattr(tracks, "get") else None
 
-        measured_corners = live_corners[marker_id]
+        measured_corners = None
+        predicted = False
+        prediction_age = 0.0
+        if track is not None:
+            if getattr(track, "is_live", False):
+                measured_corners = getattr(track, "corners", None)
+            elif (
+                config.allow_predicted_pose
+                and getattr(track, "corners", None) is not None
+                and float(getattr(track, "age", 0.0))
+                <= config.max_prediction_age_seconds
+            ):
+                measured_corners = track.corners
+                predicted = True
+                prediction_age = float(getattr(track, "age", 0.0))
+            else:
+                reason = (
+                    "marker not detected live"
+                    if not config.allow_predicted_pose
+                    else "predicted marker position expired"
+                )
+                return self._reject(reason, reliability)
+        elif marker_id in live:
+            measured_corners = live_corners.get(marker_id)
+            if measured_corners is None:
+                return self._reject("marker corners unavailable", reliability)
+        else:
+            return self._reject("marker not detected live", reliability)
+
+        if measured_corners is None:
+            return self._reject("marker corners unavailable", reliability)
         refined = False
         fit_error = None
         refinement_reason = ""
@@ -330,5 +368,7 @@ class PoseEstimator:
             refined=refined,
             fit_error_px=fit_error,
             refinement_reason=refinement_reason,
+            predicted=predicted,
+            prediction_age_seconds=prediction_age,
             corners_px=corrected,
         )

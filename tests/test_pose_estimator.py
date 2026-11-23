@@ -44,6 +44,25 @@ def tracker_result(
     )
 
 
+def marker_track(corners, *, is_live=False, age=0.0):
+    centre = np.asarray(corners, dtype=np.float64).reshape(-1, 2).mean(axis=0)
+    return SimpleNamespace(
+        marker_id=4,
+        center=centre,
+        corners=corners,
+        velocity=np.zeros(2),
+        last_seen=0.0,
+        age=age,
+        is_live=is_live,
+    )
+
+
+def result_with_track(corners, *, is_live=False, age=0.0):
+    result = tracker_result(corners, live={})
+    result.tracks = {4: marker_track(corners, is_live=is_live, age=age)}
+    return result
+
+
 class AngleHelperTests(unittest.TestCase):
     def test_wrap_angle_handles_half_turns_and_wrap_around(self):
         self.assertAlmostEqual(pose_estimator.wrap_angle(0, 180), 0)
@@ -205,6 +224,52 @@ class PoseEstimatorTests(unittest.TestCase):
         self.assertFalse(missing.valid)
         self.assertFalse(unreliable.valid)
         self.assertIn("unreliable", unreliable.reason)
+
+    def test_predicted_pose_is_flagged_within_the_grace_period(self):
+        estimator = self.make_estimator()
+        corners = rotated_square((500, 250), 40, 10)
+
+        pose = estimator.update(
+            result_with_track(corners, is_live=False, age=0.2),
+            now=0.2,
+        )
+
+        self.assertTrue(pose.valid)
+        self.assertTrue(pose.predicted)
+        self.assertAlmostEqual(pose.prediction_age_seconds, 0.2)
+        self.assertAlmostEqual(pose.x_px, 500.0)
+        self.assertAlmostEqual(pose.angle_deg, 10.0)
+
+    def test_expired_or_disabled_predictions_are_rejected(self):
+        corners = rotated_square((500, 250), 40, 0)
+        estimator = self.make_estimator()
+
+        expired = estimator.update(
+            result_with_track(corners, age=0.5),
+            now=0.5,
+        )
+        disabled = self.make_estimator(allow_predicted_pose=False).update(
+            result_with_track(corners, age=0.1),
+            now=0.1,
+        )
+
+        self.assertFalse(expired.valid)
+        self.assertIn("expired", expired.reason)
+        self.assertFalse(disabled.valid)
+        self.assertIn("not detected", disabled.reason)
+
+    def test_live_track_takes_priority_over_prediction(self):
+        estimator = self.make_estimator()
+        corners = rotated_square((500, 250), 40, 0)
+
+        pose = estimator.update(
+            result_with_track(corners, is_live=True, age=0.5),
+            now=0.5,
+        )
+
+        self.assertTrue(pose.valid)
+        self.assertFalse(pose.predicted)
+        self.assertEqual(pose.prediction_age_seconds, 0.0)
 
     def test_degenerate_or_too_small_markers_are_rejected(self):
         estimator = self.make_estimator(min_marker_area_px=50.0)

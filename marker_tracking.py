@@ -17,6 +17,26 @@ MEMORY_SECONDS = 2.0
 RELIABILITY_WINDOW = 100
 
 
+@dataclass(frozen=True)
+class DetectionConfig:
+    """Rules for choosing one candidate per marker across processing variants."""
+
+    max_area_ratio: float = 1.8
+    min_compactness: float = 0.5
+
+    def __post_init__(self):
+        if (
+            not math.isfinite(float(self.max_area_ratio))
+            or float(self.max_area_ratio) < 1.0
+        ):
+            raise ValueError("Maximum area ratio must be at least one")
+        if (
+            not math.isfinite(float(self.min_compactness))
+            or not 0.0 <= float(self.min_compactness) <= 1.0
+        ):
+            raise ValueError("Minimum compactness must be between 0 and 1")
+
+
 def output_size_for_area(width, height, long_edge=1000):
     """Scale area dimensions to pixels while preserving their aspect ratio."""
     if not math.isfinite(width) or not math.isfinite(height) or width <= 0 or height <= 0:
@@ -69,12 +89,75 @@ def merge_marker_ids(base_ids, additional_ids):
     ).reshape(-1, 1)
 
 
+def _candidate_area(corners, cv2_module):
+    points = np.asarray(corners, dtype=np.float32).reshape(-1, 2)
+    return abs(float(cv2_module.contourArea(points)))
+
+
+def _candidate_compactness(corners, cv2_module):
+    """Isoperimetric quotient: 1.0 for a circle, about 0.79 for a square."""
+    points = np.asarray(corners, dtype=np.float32).reshape(-1, 2)
+    if points.shape != (4, 2) or not np.isfinite(points).all():
+        return 0.0
+    area = _candidate_area(points, cv2_module)
+    perimeter = float(
+        cv2_module.arcLength(points.reshape(-1, 1, 2), True)
+    )
+    if area <= 0.0 or perimeter <= 0.0:
+        return 0.0
+    return 4.0 * math.pi * area / (perimeter * perimeter)
+
+
+def choose_detection_candidates(candidates, cv2_module, config=None):
+    """Pick the most plausible corners per ID instead of the largest contour.
+
+    A threshold variant can fuse the marker border with the bright background
+    and report an oversized quadrilateral.  Across variants the true marker
+    size is the one that repeats, so candidates close to their ID's median area
+    win; an oversized outlier is discarded.  Ties favour the tighter, more
+    compact contour and the variant that appeared first (plain grayscale).
+    """
+    config = DetectionConfig() if config is None else config
+    detections = {}
+    for marker_id, options in candidates.items():
+        if not options:
+            continue
+        areas = [
+            _candidate_area(corner, cv2_module) for corner in options
+        ]
+        median_area = float(np.median(np.asarray(areas, dtype=np.float64)))
+        scored = []
+        for corner, area in zip(options, areas):
+            compactness = _candidate_compactness(corner, cv2_module)
+            if compactness < config.min_compactness:
+                continue
+            if area > median_area * config.max_area_ratio:
+                continue
+            scored.append(
+                (abs(area - median_area), -compactness, float(area), corner)
+            )
+        if not scored:
+            scored = [
+                (
+                    float("inf"),
+                    -_candidate_compactness(corner, cv2_module),
+                    float(area),
+                    corner,
+                )
+                for corner, area in zip(options, areas)
+            ]
+        scored.sort(key=lambda item: item[:3])
+        detections[marker_id] = scored[0][3]
+    return detections
+
+
 class ArucoMarkerDetector:
     """Try progressively enhanced images until all expected IDs are found."""
 
-    def __init__(self, cv2_module=cv2, expected_ids=EXPECTED_MARKER_IDS):
+    def __init__(self, cv2_module=cv2, expected_ids=EXPECTED_MARKER_IDS, config=None):
         self.cv2 = cv2_module
         self.expected_ids = set(expected_ids)
+        self.config = DetectionConfig() if config is None else config
         self.dictionary = cv2_module.aruco.getPredefinedDictionary(
             cv2_module.aruco.DICT_4X4_50
         )
@@ -114,7 +197,7 @@ class ArucoMarkerDetector:
         return abs(float(self.cv2.contourArea(points)))
 
     def detect(self, frame):
-        detections = {}
+        candidates = {}
         rejected = []
         seen_rejected = []
         for image in self._processing_variants(frame):
@@ -132,13 +215,15 @@ class ArucoMarkerDetector:
                     marker_id = int(marker_id)
                     if marker_id not in self.expected_ids:
                         continue
-                    current = detections.get(marker_id)
-                    if current is None or self._candidate_area(corner) > self._candidate_area(current):
-                        detections[marker_id] = corner
+                    candidates.setdefault(marker_id, []).append(
+                        np.asarray(corner).copy()
+                    )
 
-            if self.expected_ids.issubset(detections):
+            if self.expected_ids.issubset(candidates):
                 break
 
+        config = getattr(self, "config", None)
+        detections = choose_detection_candidates(candidates, self.cv2, config)
         ids = np.asarray(sorted(detections), dtype=np.int32).reshape(-1, 1)
         detected_corners = [detections[int(marker_id)] for marker_id in ids.reshape(-1)]
         return detected_corners, ids if ids.size else None, len(rejected)
@@ -163,6 +248,19 @@ class MarkerMemory:
 
 
 @dataclass
+class MarkerTrack:
+    """Continuous state for one of the fixed set of expected marker IDs."""
+
+    marker_id: int
+    center: np.ndarray
+    corners: np.ndarray
+    velocity: np.ndarray
+    last_seen: float
+    age: float = 0.0
+    is_live: bool = True
+
+
+@dataclass
 class TrackerResult:
     live: dict
     live_corners: dict
@@ -173,6 +271,10 @@ class TrackerResult:
     calibrated: bool
     calibration_observations: dict
     calibration: np.ndarray | None
+    calibration_confirmed: bool
+    calibration_pending: bool
+    tracked_ids: tuple
+    tracks: dict
     output_size: tuple
 
 
@@ -188,16 +290,38 @@ class MarkerTracker:
         memory_seconds=MEMORY_SECONDS,
         observation_window=OBSERVATION_WINDOW,
         minimum_observations=MINIMUM_OBSERVATIONS,
+        association_radius_rate=0.05,
+        velocity_smoothing=0.5,
+        max_velocity_rate=2.0,
+        prediction_window_seconds=1.0,
+        carriage_id=4,
     ):
+        if not math.isfinite(float(association_radius_rate)) or association_radius_rate <= 0:
+            raise ValueError("Association radius rate must be positive")
+        if not 0.0 <= float(velocity_smoothing) <= 1.0:
+            raise ValueError("Velocity smoothing must be between 0 and 1")
+        if not math.isfinite(float(max_velocity_rate)) or max_velocity_rate <= 0:
+            raise ValueError("Maximum velocity rate must be positive")
+        if (
+            not math.isfinite(float(prediction_window_seconds))
+            or prediction_window_seconds < 0
+        ):
+            raise ValueError("Prediction window cannot be negative")
         self.cv2 = cv2_module
         self.expected_ids = tuple(expected_ids)
         self.corner_ids = tuple(corner_ids)
         self.calibration_ids = self.corner_ids
+        self.carriage_id = int(carriage_id)
         self.output_size = output_size
         self.memory_seconds = memory_seconds
         self.observation_window = observation_window
         self.minimum_observations = minimum_observations
+        self.association_radius_rate = float(association_radius_rate)
+        self.velocity_smoothing = float(velocity_smoothing)
+        self.max_velocity_rate = float(max_velocity_rate)
+        self.prediction_window_seconds = float(prediction_window_seconds)
         self.memory = {}
+        self.tracks = {marker_id: None for marker_id in self.expected_ids}
         self.observations = {
             marker_id: deque(maxlen=observation_window)
             for marker_id in self.expected_ids
@@ -217,6 +341,37 @@ class MarkerTracker:
         self.calibration = None
         self.calibration_sources = None
         self.calibration_output_size = output_size
+        self.calibration_confirmed = False
+        self.locked_calibration = None
+        self.locked_sources = None
+        self.locked_output_size = output_size
+
+    @property
+    def tracked_ids(self):
+        """Only the carriage matters once the human has locked calibration."""
+        if self.calibration_confirmed:
+            return (self.carriage_id,)
+        return self.expected_ids
+
+    def confirm_calibration(self):
+        """Lock the current homography after human inspection.
+
+        Returns False when no calibration exists yet.  Corner markers stay
+        detected afterwards, but only to notice movement that unlocks again.
+        """
+        if self.calibration is None or self.calibration_sources is None:
+            return False
+        self.calibration_confirmed = True
+        self.locked_calibration = self.calibration.copy()
+        self.locked_sources = {
+            marker_id: position.copy()
+            for marker_id, position in self.calibration_sources.items()
+        }
+        self.locked_output_size = self.calibration_output_size
+        for marker_id in self.corner_ids:
+            self.memory.pop(marker_id, None)
+            self.tracks[marker_id] = None
+        return True
 
     @staticmethod
     def _center(corners):
@@ -261,6 +416,8 @@ class MarkerTracker:
         return np.median(inlier_corners, axis=0)
 
     def _make_calibration(self, frame_shape):
+        if self.calibration_confirmed:
+            return
         diagonal = math.hypot(frame_shape[1], frame_shape[0])
         consistency_radius = max(6.0, diagonal * 0.005)
         positions = {
@@ -336,6 +493,13 @@ class MarkerTracker:
                 self.calibration = None
                 self.calibration_sources = None
                 self.calibration_output_size = self.output_size
+                self.calibration_confirmed = False
+                self.locked_calibration = None
+                self.locked_sources = None
+                self.locked_output_size = self.output_size
+                for corner_id in self.corner_ids:
+                    self.memory.pop(corner_id, None)
+                    self.tracks[corner_id] = None
                 for samples in self.observations.values():
                     samples.clear()
                 for samples in self.corner_observations.values():
@@ -351,6 +515,77 @@ class MarkerTracker:
                 return True
         return False
 
+    def _update_tracks(self, live, live_corners, frame_shape, now, tracked_ids=None):
+        """Associate fresh detections by ID and coast tracks through misses.
+
+        A detection is accepted only when it lands near the position predicted
+        from the track's recent velocity, so a marker cannot teleport.  Missed
+        detections leave the track at its predicted position with ``is_live``
+        false, which consumers may only use for a short, flagged grace period.
+        """
+        tracked_ids = self.expected_ids if tracked_ids is None else tracked_ids
+        diagonal = math.hypot(frame_shape[1], frame_shape[0])
+        radius = max(20.0, diagonal * self.association_radius_rate)
+        max_speed = diagonal * self.max_velocity_rate
+        for marker_id in tracked_ids:
+            track = self.tracks.get(marker_id)
+            raw_center = live.get(marker_id)
+            raw_corners = live_corners.get(marker_id)
+
+            predicted_center = None
+            dt = 0.0
+            if track is not None:
+                dt = now - track.last_seen
+                if 0.0 < dt <= self.prediction_window_seconds:
+                    predicted_center = track.center + track.velocity * dt
+                else:
+                    predicted_center = track.center.copy()
+
+            accepted = raw_center is not None and (
+                track is None
+                or predicted_center is None
+                or float(np.linalg.norm(raw_center - predicted_center)) <= radius
+            )
+
+            if accepted:
+                center = np.asarray(raw_center, dtype=np.float32).copy()
+                corners = np.asarray(raw_corners).copy()
+                if track is not None and dt > 1e-3:
+                    instantaneous = (center - predicted_center) / dt
+                else:
+                    instantaneous = np.zeros(2, dtype=np.float32)
+                if track is not None:
+                    velocity = (
+                        self.velocity_smoothing * track.velocity
+                        + (1.0 - self.velocity_smoothing) * instantaneous
+                    )
+                else:
+                    velocity = np.zeros(2, dtype=np.float32)
+                speed = float(np.linalg.norm(velocity))
+                if speed > max_speed and speed > 0.0:
+                    velocity = velocity * (max_speed / speed)
+                self.tracks[marker_id] = MarkerTrack(
+                    marker_id=marker_id,
+                    center=center,
+                    corners=corners,
+                    velocity=velocity,
+                    last_seen=now,
+                    age=0.0,
+                    is_live=True,
+                )
+            elif track is not None:
+                center = predicted_center.copy()
+                displacement = center - track.center
+                self.tracks[marker_id] = MarkerTrack(
+                    marker_id=marker_id,
+                    center=center,
+                    corners=track.corners + displacement,
+                    velocity=track.velocity,
+                    last_seen=track.last_seen,
+                    age=max(0.0, now - track.last_seen),
+                    is_live=False,
+                )
+
     def update(self, corners, ids, rejected_count, frame_shape, now=None):
         now = time.monotonic() if now is None else now
         live = {}
@@ -365,13 +600,14 @@ class MarkerTracker:
                 center = self._center(marker_corners)
                 live[marker_id] = center
                 live_corners[marker_id] = np.asarray(marker_corners).copy()
-                self.memory[marker_id] = MarkerMemory(
-                    center=center.copy(),
-                    corners=np.asarray(marker_corners).copy(),
-                    last_seen=now,
-                )
+                if marker_id in self.tracked_ids:
+                    self.memory[marker_id] = MarkerMemory(
+                        center=center.copy(),
+                        corners=np.asarray(marker_corners).copy(),
+                        last_seen=now,
+                    )
 
-        for marker_id in self.expected_ids:
+        for marker_id in self.tracked_ids:
             self.reliability_samples[marker_id].append(marker_id in live)
             self.observations[marker_id].append(
                 live[marker_id].copy() if marker_id in live else None
@@ -384,6 +620,14 @@ class MarkerTracker:
             if now - remembered.last_seen > self.memory_seconds:
                 del self.memory[marker_id]
 
+        self._update_tracks(
+            live,
+            live_corners,
+            frame_shape,
+            now,
+            tracked_ids=self.tracked_ids,
+        )
+
         moved = False
         if self.calibration is not None:
             moved = self._invalidate_if_moved(live, live_corners, frame_shape)
@@ -391,7 +635,7 @@ class MarkerTracker:
             self._make_calibration(frame_shape)
 
         missing = tuple(
-            marker_id for marker_id in self.expected_ids if marker_id not in live
+            marker_id for marker_id in self.tracked_ids if marker_id not in live
         )
         remembered = {
             marker_id: self.memory[marker_id]
@@ -400,24 +644,40 @@ class MarkerTracker:
         }
         reliability = {
             marker_id: (
-                sum(samples) / len(samples) if samples else 0.0
+                sum(self.reliability_samples[marker_id])
+                / len(self.reliability_samples[marker_id])
+                if self.reliability_samples[marker_id]
+                else 0.0
             )
-            for marker_id, samples in self.reliability_samples.items()
+            for marker_id in self.tracked_ids
         }
         observation_counts = {
-            marker_id: sum(sample is not None for sample in samples)
-            for marker_id, samples in self.observations.items()
+            marker_id: sum(
+                sample is not None for sample in self.observations[marker_id]
+            )
+            for marker_id in self.tracked_ids
+        }
+        tracks = {
+            marker_id: self.tracks[marker_id]
+            for marker_id in self.tracked_ids
+            if self.tracks.get(marker_id) is not None
         }
         return TrackerResult(
             live=live,
             live_corners=live_corners,
             remembered=remembered,
+            tracks=tracks,
             missing=missing,
             reliability=reliability,
             rejected_count=rejected_count,
             calibrated=self.calibration is not None,
             calibration_observations=observation_counts,
             calibration=self.calibration,
+            calibration_confirmed=self.calibration_confirmed,
+            calibration_pending=(
+                self.calibration is not None and not self.calibration_confirmed
+            ),
+            tracked_ids=self.tracked_ids,
             output_size=(
                 self.calibration_output_size
                 if self.calibration is not None

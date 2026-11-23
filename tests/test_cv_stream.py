@@ -2,6 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+import cv2
 import numpy as np
 
 import cv_stream
@@ -102,6 +103,44 @@ class MarkerIdMergeTests(unittest.TestCase):
 
         np.testing.assert_array_equal(corrected[3, 5], (255, 255, 255))
         self.assertEqual(corrected.shape, (12, 12, 3))
+
+    def test_confirm_key_reports_tracker_state(self):
+        tracker = mock.Mock()
+        tracker.confirm_calibration.return_value = True
+        self.assertIn("locked", cv_stream.confirm_calibration_key(tracker))
+
+        tracker.confirm_calibration.return_value = False
+        tracker.calibration_confirmed = True
+        self.assertIn("already locked", cv_stream.confirm_calibration_key(tracker))
+
+        tracker.calibration_confirmed = False
+        self.assertIn("not ready", cv_stream.confirm_calibration_key(tracker))
+
+    def test_locked_display_draws_only_the_carriage_marker(self):
+        corners = np.zeros((1, 4, 2), dtype=np.float32)
+        result = SimpleNamespace(
+            live={0: np.array([10.0, 10.0]), 4: np.array([100.0, 100.0])},
+            live_corners={0: corners, 4: corners},
+            remembered={},
+            tracks={},
+            missing=(),
+            reliability={4: 1.0},
+            rejected_count=0,
+            calibrated=True,
+            calibration_observations={4: 3},
+            calibration_confirmed=True,
+            calibration_pending=False,
+            tracked_ids=(4,),
+        )
+        frame = np.zeros((800, 1200, 3), dtype=np.uint8)
+
+        with mock.patch.object(cv_stream.cv2.aruco, "drawDetectedMarkers") as draw:
+            cv_stream.draw_tracking_status(frame, result)
+
+        np.testing.assert_array_equal(
+            np.asarray(draw.call_args[0][2]).reshape(-1),
+            [4],
+        )
 
     def test_pose_status_is_drawn_when_a_pose_is_supplied(self):
         frame = np.zeros((2, 3, 3), dtype=np.uint8)

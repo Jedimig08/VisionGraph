@@ -20,6 +20,7 @@ FPS_WINDOW_SECONDS = 3.0
 FPS_LEVELS = (15, 12, 10, 8, 5)
 CALIBRATION_RETRY_SECONDS = 15.0
 STREAM_RETRY_SECONDS = 3.0
+PREDICTED_DISPLAY_SECONDS = 0.3
 
 configure_aruco_params = marker_tracking.configure_aruco_params
 merge_marker_ids = marker_tracking.merge_marker_ids
@@ -101,6 +102,18 @@ def open_stream(stream_url):
     return stream
 
 
+def confirm_calibration_key(tracker):
+    """Lock a ready calibration and return the status message to print."""
+    if tracker.confirm_calibration():
+        return (
+            "Calibration confirmed: homography locked, "
+            "tracking carriage marker only"
+        )
+    if getattr(tracker, "calibration_confirmed", False):
+        return "Calibration is already locked; press R to recalibrate"
+    return "Calibration is not ready to confirm yet"
+
+
 def draw_tracking_status(frame, result, homography=None):
     def transform_points(points):
         points = np.asarray(points, dtype=np.float32).reshape(-1, 1, 2)
@@ -108,14 +121,20 @@ def draw_tracking_status(frame, result, homography=None):
             points = cv2.perspectiveTransform(points, homography)
         return points.reshape(-1, 2)
 
-    if result.live:
-        live_ids = np.asarray(sorted(result.live), dtype=np.int32).reshape(-1, 1)
+    tracked_ids = tuple(getattr(result, "tracked_ids", ()))
+    visible_live = {
+        marker_id: center
+        for marker_id, center in result.live.items()
+        if not tracked_ids or marker_id in tracked_ids
+    }
+    if visible_live:
+        live_ids = np.asarray(sorted(visible_live), dtype=np.int32).reshape(-1, 1)
         live_corners = [
             transform_points(result.live_corners[marker_id]).reshape(1, -1, 2)
-            for marker_id in sorted(result.live)
+            for marker_id in sorted(visible_live)
         ]
         cv2.aruco.drawDetectedMarkers(frame, live_corners, live_ids)
-        for marker_id, center in result.live.items():
+        for marker_id, center in visible_live.items():
             point = tuple(np.round(transform_points([center])[0]).astype(int))
             cv2.putText(
                 frame,
@@ -128,6 +147,8 @@ def draw_tracking_status(frame, result, homography=None):
             )
 
     for marker_id, memory in result.remembered.items():
+        if tracked_ids and marker_id not in tracked_ids:
+            continue
         center = tuple(np.round(transform_points([memory.center])[0]).astype(int))
         cv2.circle(frame, center, 8, (0, 165, 255), 2)
         age = max(0.0, time.monotonic() - memory.last_seen)
@@ -141,27 +162,60 @@ def draw_tracking_status(frame, result, homography=None):
             2,
         )
 
+    tracks = getattr(result, "tracks", {}) or {}
+    predicted = {
+        marker_id: track
+        for marker_id, track in tracks.items()
+        if (not tracked_ids or marker_id in tracked_ids)
+        and not getattr(track, "is_live", True)
+        and 0.0 <= float(getattr(track, "age", 0.0)) <= PREDICTED_DISPLAY_SECONDS
+    }
+    for marker_id, track in predicted.items():
+        center = tuple(np.round(transform_points([track.center])[0]).astype(int))
+        cv2.circle(frame, center, 6, (255, 0, 255), 1)
+        cv2.putText(
+            frame,
+            f"ID {marker_id} predicted {track.age:.1f}s",
+            (center[0] + 10, center[1] + 16),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 0, 255),
+            2,
+        )
+
     lines = [
         "Detected: " + (", ".join(map(str, sorted(result.live))) or "none"),
         "Missing: " + (", ".join(map(str, result.missing)) or "none"),
         "Remembered: " + (", ".join(map(str, sorted(result.remembered))) or "none"),
+        "Predicted: "
+        + (
+            ", ".join(
+                f"{marker_id}:{track.age:.1f}s"
+                for marker_id, track in sorted(predicted.items())
+            )
+            or "none"
+        ),
         f"Rejected ArUco candidates: {result.rejected_count}",
         "Detection reliability: "
         + " ".join(
             f"{marker_id}:{result.reliability[marker_id] * 100:.0f}%"
-            for marker_id in marker_tracking.EXPECTED_MARKER_IDS
+            for marker_id in sorted(result.reliability)
         ),
         (
-            "Calibration: ready"
+            "Calibration: LOCKED (press R to recalibrate)"
+            if getattr(result, "calibration_confirmed", False)
+            else "Calibration: PROVISIONAL - press C to confirm"
             if result.calibrated
             else "Calibration observations: "
             + " ".join(
                 f"{marker_id}:{result.calibration_observations[marker_id]}/"
                 f"{marker_tracking.MINIMUM_OBSERVATIONS}"
-                for marker_id in marker_tracking.EXPECTED_MARKER_IDS
+                for marker_id in sorted(result.calibration_observations)
             )
         ),
     ]
+    if getattr(result, "calibration_confirmed", False):
+        lines.append("Tracking: carriage marker only")
     for line_index, line in enumerate(lines):
         cv2.putText(
             frame,
@@ -194,9 +248,14 @@ def draw_pose_status(frame, estimate):
             ),
             f"Corner source: {corner_source}",
         ]
+        if getattr(estimate, "predicted", False):
+            lines.append(
+                "PREDICTED pose "
+                f"({getattr(estimate, 'prediction_age_seconds', 0.0):.2f}s since detection)"
+            )
         if not estimate.inside_drawing_area:
             lines.append("Warning: carriage is outside the drawing area")
-        colour = (0, 255, 0)
+        colour = (0, 255, 0) if not getattr(estimate, "predicted", False) else (0, 165, 255)
     else:
         lines = [f"Carriage pose unavailable: {estimate.reason}"]
         colour = (0, 0, 255)
@@ -375,11 +434,12 @@ def main():
                 show_full_frame,
                 pose_result,
             )
-            view_label = (
-                "View: full camera frame"
-                if show_full_frame or result.calibration is None
-                else "View: calibrated area"
-            )
+            if show_full_frame or result.calibration is None:
+                view_label = "View: full camera frame"
+            elif getattr(result, "calibration_confirmed", False):
+                view_label = "View: calibrated area (locked)"
+            else:
+                view_label = "View: calibrated area"
             cv2.putText(
                 display_frame,
                 view_label,
@@ -415,11 +475,16 @@ def main():
                 )
             if key == ord("v"):
                 show_full_frame = not show_full_frame
+            if key == ord("c"):
+                print(confirm_calibration_key(tracker))
             if key == ord("r"):
                 tracker = marker_tracking.MarkerTracker(output_size=output_size)
                 pose.reset()
                 calibration_started = time.monotonic()
-                print("Cleared marker history; collecting calibration observations again")
+                print(
+                    "Cleared calibration lock and marker history; "
+                    "collecting observations again"
+                )
     finally:
         cap.release()
         cv2.destroyAllWindows()

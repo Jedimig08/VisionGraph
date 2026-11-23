@@ -135,6 +135,136 @@ class MarkerTrackerTests(unittest.TestCase):
         expired = tracker.update([], None, 0, self.frame_shape, now=2.1)
         self.assertNotIn(0, expired.remembered)
 
+    def test_track_follows_motion_and_coasts_through_a_brief_dropout(self):
+        tracker = marker_tracking.MarkerTracker(
+            output_size=marker_tracking.output_size_for_area(2, 1)
+        )
+        corners, ids = self.frame_detections([4])
+        first = tracker.update(corners, ids, 0, self.frame_shape, now=0.0)
+        self.assertTrue(first.tracks[4].is_live)
+        self.assertEqual(first.tracks[4].age, 0.0)
+
+        moved = dict(self.centers)
+        moved[4] = (self.centers[4][0] + 10, self.centers[4][1])
+        corners, ids = self.frame_detections([4], moved)
+        second = tracker.update(corners, ids, 0, self.frame_shape, now=0.1)
+        self.assertTrue(second.tracks[4].is_live)
+        self.assertGreater(second.tracks[4].velocity[0], 0.0)
+
+        missing = tracker.update([], None, 0, self.frame_shape, now=0.2)
+        track = missing.tracks[4]
+        self.assertFalse(track.is_live)
+        self.assertAlmostEqual(track.age, 0.1)
+        self.assertGreater(track.center[0], moved[4][0])
+        self.assertLess(track.center[0], moved[4][0] + 20)
+        self.assertEqual(track.corners.shape, corners[0].shape)
+
+        later = tracker.update([], None, 0, self.frame_shape, now=0.3)
+        self.assertGreater(later.tracks[4].center[0], track.center[0])
+
+    def test_track_rejects_a_teleporting_detection(self):
+        tracker = marker_tracking.MarkerTracker(
+            output_size=marker_tracking.output_size_for_area(2, 1)
+        )
+        corners, ids = self.frame_detections([4])
+        tracker.update(corners, ids, 0, self.frame_shape, now=0.0)
+
+        jumped = dict(self.centers)
+        jumped[4] = (200, 200)
+        corners, ids = self.frame_detections([4], jumped)
+        result = tracker.update(corners, ids, 0, self.frame_shape, now=0.1)
+
+        self.assertIn(4, result.live)
+        track = result.tracks[4]
+        self.assertFalse(track.is_live)
+        self.assertAlmostEqual(track.center[0], self.centers[4][0])
+        self.assertAlmostEqual(track.center[1], self.centers[4][1])
+
+    def test_tracks_are_only_created_for_expected_ids(self):
+        tracker = marker_tracking.MarkerTracker(
+            output_size=marker_tracking.output_size_for_area(2, 1)
+        )
+        unexpected = np.asarray([[9]], dtype=np.int32)
+        result = tracker.update(
+            self.marker_corners((100, 100)),
+            unexpected,
+            0,
+            self.frame_shape,
+            now=0.0,
+        )
+        self.assertEqual(result.tracks, {})
+
+    def make_calibrated_tracker(self):
+        tracker = marker_tracking.MarkerTracker(
+            output_size=marker_tracking.output_size_for_area(600, 400)
+        )
+        for frame_index in range(3):
+            corners, ids = self.frame_detections(marker_tracking.EXPECTED_MARKER_IDS)
+            result = tracker.update(
+                corners,
+                ids,
+                0,
+                self.frame_shape,
+                now=frame_index / 10,
+            )
+        return tracker, result
+
+    def test_confirmation_requires_a_ready_calibration(self):
+        tracker = marker_tracking.MarkerTracker(
+            output_size=marker_tracking.output_size_for_area(600, 400)
+        )
+        self.assertFalse(tracker.confirm_calibration())
+
+        tracker, result = self.make_calibrated_tracker()
+        self.assertTrue(result.calibration_pending)
+        self.assertFalse(result.calibration_confirmed)
+        self.assertTrue(tracker.confirm_calibration())
+
+    def test_confirming_locks_homography_and_limits_tracking_to_carriage(self):
+        tracker, result = self.make_calibrated_tracker()
+        locked = result.calibration.copy()
+        self.assertTrue(tracker.confirm_calibration())
+
+        moved = dict(self.centers)
+        moved[4] = (1600, 500)
+        moved[0] = (150, 150)
+        corners, ids = self.frame_detections(marker_tracking.EXPECTED_MARKER_IDS, moved)
+        after = tracker.update(corners, ids, 0, self.frame_shape, now=0.4)
+
+        self.assertTrue(after.calibration_confirmed)
+        self.assertFalse(after.calibration_pending)
+        np.testing.assert_allclose(after.calibration, locked)
+        self.assertEqual(after.tracked_ids, (4,))
+        self.assertEqual(set(after.reliability), {4})
+        self.assertEqual(set(after.tracks), {4})
+        self.assertEqual(set(after.calibration_observations), {4})
+        self.assertEqual(after.missing, ())
+
+    def test_corner_movement_unlocks_and_requires_a_new_confirmation(self):
+        tracker, _result = self.make_calibrated_tracker()
+        self.assertTrue(tracker.confirm_calibration())
+
+        moved = dict(self.centers)
+        moved[0] = (250, 250)
+        for frame_index in range(3, 9):
+            corners, ids = self.frame_detections(
+                marker_tracking.EXPECTED_MARKER_IDS,
+                moved,
+            )
+            result = tracker.update(
+                corners,
+                ids,
+                0,
+                self.frame_shape,
+                now=frame_index / 10,
+            )
+
+        self.assertFalse(result.calibration_confirmed)
+        self.assertTrue(result.calibration_pending)
+        self.assertIsNotNone(result.calibration)
+        self.assertEqual(set(result.tracked_ids), set(marker_tracking.EXPECTED_MARKER_IDS))
+        self.assertTrue(tracker.confirm_calibration())
+
     def test_calibration_is_invalidated_after_consistent_marker_movement(self):
         tracker = marker_tracking.MarkerTracker(
             output_size=marker_tracking.output_size_for_area(2, 1)
@@ -281,6 +411,36 @@ class DetectorTests(unittest.TestCase):
         self.assertEqual(len(corners), 2)
         self.assertEqual(rejected_count, 0)
         self.assertEqual(detector._detect.call_count, 2)
+
+    def test_inflated_threshold_candidate_is_rejected(self):
+        detector = marker_tracking.ArucoMarkerDetector.__new__(
+            marker_tracking.ArucoMarkerDetector
+        )
+        detector.cv2 = cv2
+        detector.expected_ids = {0, 1}
+        detector._processing_variants = lambda _frame: [0, 1]
+        compact = MarkerTrackerTests.marker_corners((20, 20))
+        inflated = MarkerTrackerTests.marker_corners((20, 20)) * 4
+        marker1 = MarkerTrackerTests.marker_corners((80, 80))
+        detector._detect = mock.Mock(
+            side_effect=[
+                ([compact], np.asarray([[0]]), []),
+                ([inflated, marker1], np.asarray([[0], [1]]), []),
+            ]
+        )
+
+        corners, ids, _rejected = detector.detect(
+            np.zeros((100, 100, 3), dtype=np.uint8)
+        )
+
+        np.testing.assert_array_equal(ids, [[0], [1]])
+        np.testing.assert_allclose(corners[0], compact)
+
+    def test_detection_config_validates_limits(self):
+        with self.assertRaises(ValueError):
+            marker_tracking.DetectionConfig(max_area_ratio=0.9)
+        with self.assertRaises(ValueError):
+            marker_tracking.DetectionConfig(min_compactness=1.2)
 
     def test_subpixel_refinement_and_threshold_tuning_are_set(self):
         params = marker_tracking.configure_aruco_params()

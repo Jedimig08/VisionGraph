@@ -29,15 +29,37 @@ Install dependencies with `python -m pip install -r requirements.txt`, then run
 available; otherwise it discovers a local CommandHub service. It selects the
 best reported camera by default, prompting you to choose a camera and then a
 starting resolution. Press Enter at either prompt to accept the recommended
-camera or largest resolution. Press `f` to toggle fullscreen, `r` to clear
-marker history and recalibrate, `v` to toggle between the full camera frame and
-the calibrated area, or `q` to quit. The calibrated area is shown by default.
+camera or largest resolution. Press `f` to toggle fullscreen, `c` to confirm a ready calibration and lock it,
+`r` to clear the lock and marker history and recalibrate, `v` to toggle between
+the full camera frame and the calibrated area, or `q` to quit. The calibrated area is shown by default.
 If the camera stream is temporarily unavailable, the client keeps retrying
 every three seconds and reconnects if the stream drops.
 At startup, enter the drawing-area width and height. The corrected image
 preserves their aspect ratio with its longest edge scaled to 1000 pixels. The
 outward-facing corners of the four corner markers align exactly with the four
 corners of the corrected view.
+
+## Manual Carriage Control
+
+`python commandhub_manual_control.py` is a standalone, human-in-the-loop bench
+tool for driving the carriage by keypress. It uses the same CommandHub
+discovery as the camera client and sends raw `P <pin> <0-255>` commands to
+`POST /bluetooth-send`, which the phone relays over Bluetooth to the
+ESP32/Arduino. It fetches the paired devices from `GET /api/bluetooth/devices`
+(the same list shown on CommandHub's `/bluetooth` page) and shows a numbered
+menu; press Enter to accept the first device. `--device <MAC>` skips the menu.
+The tool calls `POST /bluetooth-connect` and only starts the key controls when
+CommandHub reports `Connected to ...`; a failed connection exits without
+sending any motor commands. Bluetooth must be enabled in CommandHub's privacy
+settings.
+Enter the up/down speed for each motor after connecting (motor 1:
+IN1 32 / IN2 33; motor 2: IN3 25 / IN4 26). Left/right arrows select a motor,
+up/down drive it, space stops all motors, and `q` stops all and exits. The
+control panel needs at least 76 columns by 12 rows; if the terminal is smaller
+it displays a resize message and waits (ignoring keys) until you enlarge it.
+
+This tool is not used by the CV client and moves the carriage only in response
+to your keys.
 
 ## Marker Tracking and Calibration
 
@@ -53,6 +75,24 @@ markers do not need to appear together. Each incoming frame is warped to the
 top-down view, then live detections and tracking overlays are drawn at their
 transformed positions. Remembered positions expire after two seconds and are
 never used to calibrate. Movement of a corner marker invalidates calibration.
+Detection gathers candidates from several image-processing variants and chooses
+the one closest to the marker's consensus size instead of the largest contour,
+so a threshold variant cannot fuse the black border with the white background
+and report an oversized box. Each expected ID also has a continuous track: a
+new detection is accepted only if it appears near the position predicted from
+recent motion, so markers cannot teleport, and brief dropouts are coasted over.
+The carriage pose may use a coasted position only for 0.3 seconds and is
+flagged as `PREDICTED`; calibration always uses fresh detections only. Position
+and speed gates can be tuned with the `MarkerTracker` and `PoseEstimator`
+configuration objects.
+
+Calibration is provisional until you press `c`. Confirming it locks the
+homography and the calibrated cutout; only the carriage marker (ID 4) is then
+tracked and drawn, while corner markers are still detected solely to notice
+movement. If a corner marker moves consistently, the lock is cleared, a new
+provisional calibration is computed, and `c` must be pressed again. `r` clears
+the lock and recollects calibration observations at any time.
+
 The app defaults to the largest camera resolution, tries higher resolutions if
 calibration remains incomplete, and never lowers resolution automatically.
 Requested FPS is reduced only when the stream is persistently running slowly.
