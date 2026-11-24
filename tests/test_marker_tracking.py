@@ -1,3 +1,4 @@
+import copy
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -381,6 +382,85 @@ class MarkerTrackerTests(unittest.TestCase):
             ],
             atol=1,
         )
+
+
+class CalibrationPersistenceTests(MarkerTrackerTests):
+    def saved_payload(self):
+        tracker, result = self.make_calibrated_tracker()
+        payload = tracker.export_calibration()
+        payload["drawing_area"] = [600.0, 400.0]
+        payload["resolution"] = [2000, 1000]
+        return tracker, result, payload
+
+    def test_export_returns_nothing_without_a_calibration(self):
+        tracker = marker_tracking.MarkerTracker(output_size=(1000, 667))
+        self.assertIsNone(tracker.export_calibration())
+
+    def test_import_restores_a_locked_calibration_without_observations(self):
+        _tracker, result, payload = self.saved_payload()
+        restored = marker_tracking.MarkerTracker(output_size=(10, 10))
+
+        self.assertTrue(restored.import_calibration(payload))
+        after = restored.update([], None, 0, self.frame_shape, now=0.0)
+
+        self.assertTrue(after.calibrated)
+        self.assertTrue(after.calibration_confirmed)
+        self.assertFalse(after.calibration_pending)
+        np.testing.assert_allclose(after.calibration, result.calibration)
+        self.assertEqual(after.output_size, result.output_size)
+        self.assertEqual(after.tracked_ids, (4,))
+
+    def test_imported_calibration_still_invalidates_when_a_corner_moves(self):
+        restored = marker_tracking.MarkerTracker(output_size=(1000, 667))
+        _tracker, _result, payload = self.saved_payload()
+        restored.import_calibration(payload)
+
+        moved = dict(self.centers)
+        moved[0] = (250, 250)
+        after = None
+        for frame_index in range(3):
+            corners, ids = self.frame_detections(
+                marker_tracking.EXPECTED_MARKER_IDS, moved
+            )
+            after = restored.update(
+                corners, ids, 0, self.frame_shape, now=frame_index / 10
+            )
+
+        self.assertFalse(after.calibrated)
+        self.assertFalse(after.calibration_confirmed)
+
+    def test_malformed_calibration_payloads_are_rejected(self):
+        _tracker, _result, payload = self.saved_payload()
+
+        wrong_shape = copy.deepcopy(payload)
+        wrong_shape["homography"] = [[1, 0, 0], [0, 1, 0]]
+        with self.assertRaises(ValueError):
+            marker_tracking.normalize_calibration(wrong_shape)
+
+        non_finite = copy.deepcopy(payload)
+        non_finite["homography"][0][0] = float("nan")
+        with self.assertRaises(ValueError):
+            marker_tracking.normalize_calibration(non_finite)
+
+        singular = copy.deepcopy(payload)
+        singular["homography"] = np.zeros((3, 3)).tolist()
+        with self.assertRaises(ValueError):
+            marker_tracking.normalize_calibration(singular)
+
+        missing_corner = copy.deepcopy(payload)
+        del missing_corner["sources"]["0"]
+        with self.assertRaises(ValueError):
+            marker_tracking.normalize_calibration(missing_corner)
+
+        bad_area = copy.deepcopy(payload)
+        bad_area["drawing_area"] = [0, 400]
+        with self.assertRaises(ValueError):
+            marker_tracking.normalize_calibration(bad_area)
+
+        unsupported_version = copy.deepcopy(payload)
+        unsupported_version["version"] = 99
+        with self.assertRaises(ValueError):
+            marker_tracking.normalize_calibration(unsupported_version)
 
 
 class DetectorTests(unittest.TestCase):

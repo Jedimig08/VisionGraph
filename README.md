@@ -30,11 +30,13 @@ available; otherwise it discovers a local CommandHub service. It selects the
 best reported camera by default, prompting you to choose a camera and then a
 starting resolution. Press Enter at either prompt to accept the recommended
 camera or largest resolution. Press `f` to toggle fullscreen, `c` to confirm a ready calibration and lock it,
-`r` to clear the lock and marker history and recalibrate, `v` to toggle between
-the full camera frame and the calibrated area, or `q` to quit. The calibrated area is shown by default.
+`s` to save the calibration under a name, `l` to pick a saved calibration from the catalog, `r` to clear the
+lock and marker history and recalibrate, `v` to toggle between the full camera frame and the calibrated area,
+or `q` to quit. The calibrated area is shown by default.
 If the camera stream is temporarily unavailable, the client keeps retrying
 every three seconds and reconnects if the stream drops.
-At startup, enter the drawing-area width and height. The corrected image
+At startup, enter the drawing-area width and height (unless you load a saved
+calibration, which supplies them). The corrected image
 preserves their aspect ratio with its longest edge scaled to 1000 pixels. The
 outward-facing corners of the four corner markers align exactly with the four
 corners of the corrected view.
@@ -92,6 +94,21 @@ tracked and drawn, while corner markers are still detected solely to notice
 movement. If a corner marker moves consistently, the lock is cleared, a new
 provisional calibration is computed, and `c` must be pressed again. `r` clears
 the lock and recollects calibration observations at any time.
+
+## Saving and Loading Calibration
+
+Calibrations are stored in a named catalog at
+`~/.config/visiongraph/calibrations.json`, so you can keep several setups and
+switch between them. Press `s` once calibration is ready and enter a name (Enter
+keeps the current name, so pressing `s` then Enter updates it) to write the
+homography, the calibrated cutout size, the drawing area, and the camera
+resolution. At startup the client shows the catalog; pick a number to load that
+calibration, or `0` to start a fresh one. The last used name is the default.
+Loading restores everything as a locked calibration, so the homography and
+cutout are not recalculated. Press `l` during a run to pick another saved
+calibration after pressing `r`; press `0` to cancel. A saved calibration is tied
+to its camera resolution and corner-marker positions; if those change, the lock
+is cleared and calibration starts again.
 
 The app defaults to the largest camera resolution, tries higher resolutions if
 calibration remains incomplete, and never lowers resolution automatically.

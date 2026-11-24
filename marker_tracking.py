@@ -11,6 +11,7 @@ import numpy as np
 
 EXPECTED_MARKER_IDS = (0, 1, 2, 3, 4)
 CALIBRATION_CORNER_IDS = (0, 1, 3, 2)
+CALIBRATION_VERSION = 1
 OBSERVATION_WINDOW = 5
 MINIMUM_OBSERVATIONS = 3
 MEMORY_SECONDS = 2.0
@@ -48,6 +49,81 @@ def output_size_for_area(width, height, long_edge=1000):
         max(1, round(width / longest_dimension * long_edge)),
         max(1, round(height / longest_dimension * long_edge)),
     )
+
+
+def normalize_calibration(payload):
+    """Validate a saved calibration and return a normalized, safe copy."""
+    if not isinstance(payload, dict):
+        raise ValueError("Calibration must be a JSON object")
+    try:
+        version = int(payload.get("version", CALIBRATION_VERSION))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Calibration version is invalid") from exc
+    if version != CALIBRATION_VERSION:
+        raise ValueError(f"Unsupported calibration version: {version}")
+
+    try:
+        homography = np.asarray(payload["homography"], dtype=np.float64)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Calibration homography is missing or malformed") from exc
+    if homography.shape != (3, 3) or not np.isfinite(homography).all():
+        raise ValueError("Calibration homography must be a finite 3x3 matrix")
+    if abs(float(np.linalg.det(homography))) < 1e-12:
+        raise ValueError("Calibration homography is singular")
+
+    raw_sources = payload.get("sources")
+    if not isinstance(raw_sources, dict):
+        raise ValueError("Calibration corner positions are missing")
+    sources = {}
+    for marker_id in CALIBRATION_CORNER_IDS:
+        position_data = raw_sources.get(
+            str(marker_id), raw_sources.get(marker_id)
+        )
+        try:
+            position = np.asarray(position_data, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Calibration is missing corner marker {marker_id}"
+            ) from exc
+        if position.shape != (2,) or not np.isfinite(position).all():
+            raise ValueError(
+                f"Calibration corner marker {marker_id} position is invalid"
+            )
+        sources[marker_id] = position.tolist()
+
+    try:
+        output_size = tuple(int(value) for value in payload["output_size"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Calibration output size is missing or malformed") from exc
+    if len(output_size) != 2 or min(output_size) < 2:
+        raise ValueError("Calibration output size must be at least 2x2 pixels")
+
+    try:
+        drawing_area = tuple(float(value) for value in payload["drawing_area"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Calibration drawing area is missing or malformed") from exc
+    if len(drawing_area) != 2 or any(
+        not math.isfinite(value) or value <= 0 for value in drawing_area
+    ):
+        raise ValueError("Calibration drawing area must be finite positive numbers")
+
+    resolution = payload.get("resolution")
+    if resolution is not None:
+        try:
+            resolution = tuple(int(value) for value in resolution)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Calibration camera resolution is malformed") from exc
+        if len(resolution) != 2 or min(resolution) < 1:
+            raise ValueError("Calibration camera resolution must be positive")
+
+    return {
+        "version": CALIBRATION_VERSION,
+        "homography": homography.tolist(),
+        "sources": sources,
+        "output_size": output_size,
+        "drawing_area": drawing_area,
+        "resolution": resolution,
+    }
 
 
 def configure_aruco_params(cv2_module=cv2):
@@ -371,6 +447,48 @@ class MarkerTracker:
         for marker_id in self.corner_ids:
             self.memory.pop(marker_id, None)
             self.tracks[marker_id] = None
+        return True
+
+    def export_calibration(self):
+        """Return the current homography and cutout as a serializable payload."""
+        if self.calibration is None or self.calibration_sources is None:
+            return None
+        return {
+            "version": CALIBRATION_VERSION,
+            "homography": np.asarray(self.calibration, dtype=np.float64).tolist(),
+            "sources": {
+                str(marker_id): np.asarray(position, dtype=np.float64).tolist()
+                for marker_id, position in self.calibration_sources.items()
+            },
+            "output_size": [int(value) for value in self.calibration_output_size],
+        }
+
+    def import_calibration(self, payload):
+        """Restore a saved calibration as a locked homography and cutout."""
+        normalized = normalize_calibration(payload)
+        self.calibration = np.asarray(normalized["homography"], dtype=np.float64)
+        self.calibration_sources = {
+            marker_id: np.asarray(position, dtype=np.float32)
+            for marker_id, position in normalized["sources"].items()
+        }
+        self.calibration_output_size = normalized["output_size"]
+        self.output_size = normalized["output_size"]
+        self.calibration_confirmed = True
+        self.locked_calibration = self.calibration.copy()
+        self.locked_sources = {
+            marker_id: position.copy()
+            for marker_id, position in self.calibration_sources.items()
+        }
+        self.locked_output_size = self.calibration_output_size
+        for marker_id in self.corner_ids:
+            self.memory.pop(marker_id, None)
+            self.tracks[marker_id] = None
+        for samples in self.observations.values():
+            samples.clear()
+        for samples in self.corner_observations.values():
+            samples.clear()
+        for samples in self.movement_samples.values():
+            samples.clear()
         return True
 
     @staticmethod

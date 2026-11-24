@@ -9,6 +9,7 @@ os.environ["QT_QPA_PLATFORM"] = "xcb"
 
 import cv2
 import numpy as np
+import calibration_store
 import camera_select
 import marker_tracking
 import pose_estimator
@@ -67,6 +68,185 @@ def choose_drawing_dimensions():
             print("Enter a finite positive number.")
 
     return tuple(dimensions)
+
+
+def make_tracker(output_size, calibration=None):
+    tracker = marker_tracking.MarkerTracker(output_size=output_size)
+    if calibration is not None:
+        tracker.import_calibration(calibration)
+    return tracker
+
+
+def make_pose_estimator(area_width, area_height, output_size):
+    return pose_estimator.PoseEstimator(
+        pose_estimator.PoseEstimatorConfig(
+            drawing_width_mm=area_width,
+            drawing_height_mm=area_height,
+            output_size=output_size,
+        )
+    )
+
+
+def calibration_detail(payload):
+    """Describe a saved payload for the selection menu, or mark it unusable."""
+    try:
+        normalized = marker_tracking.normalize_calibration(payload)
+    except (ValueError, TypeError):
+        return " (unusable)"
+    width, height = normalized["drawing_area"]
+    return (
+        f" (drawing area {width:g}x{height:g} mm, "
+        f"cutout {normalized['output_size'][0]}x{normalized['output_size'][1]})"
+    )
+
+
+def prompt_calibration_name(names, default_name=None, none_label="Cancel"):
+    """Show a numbered catalog and return the chosen name, or None for ``none``."""
+    print("Saved calibrations:")
+    for index, name in enumerate(names, start=1):
+        print(f"  {index}. {name}{calibration_detail(calibration_store.load(name))}")
+    print(f"  0. {none_label}")
+
+    default_index = (
+        names.index(default_name) + 1 if default_name in names else 1 if names else 0
+    )
+    while True:
+        try:
+            choice = input(
+                f"Choose calibration [0-{len(names)}, Enter for "
+                f"{default_index}]: "
+            ).strip()
+        except EOFError:
+            choice = ""
+        if not choice:
+            return names[default_index - 1] if default_index else None
+        if choice in ("0", "n", "no"):
+            return None
+        try:
+            index = int(choice)
+        except ValueError:
+            index = -1
+        if 1 <= index <= len(names):
+            return names[index - 1]
+        print(f"Enter a number from 0 to {len(names)}.")
+
+
+def choose_startup_calibration():
+    """Prompt for a saved calibration before any recalculation starts."""
+    try:
+        names = calibration_store.names()
+    except (OSError, ValueError) as exc:
+        print(f"Could not read saved calibrations: {exc}")
+        return None
+    if not names:
+        return None
+    try:
+        last = calibration_store.last_name()
+    except (OSError, ValueError):
+        last = None
+    name = prompt_calibration_name(
+        names,
+        default_name=last,
+        none_label="Start a fresh calibration",
+    )
+    if name is None:
+        return None
+    try:
+        normalized = marker_tracking.normalize_calibration(
+            calibration_store.load(name)
+        )
+    except (OSError, ValueError, TypeError) as exc:
+        print(f"Saved calibration '{name}' is unusable ({exc}); ignoring it")
+        return None
+    try:
+        calibration_store.mark_used(name)
+    except OSError:
+        pass
+    print(f"Using saved calibration '{name}'")
+    return name, normalized
+
+
+def prompt_new_calibration_name(default_name=None):
+    suggestion = default_name or "calibration"
+    try:
+        answer = input(
+            f"Save calibration as [Enter for '{suggestion}']: "
+        ).strip()
+    except EOFError:
+        answer = ""
+    return answer or suggestion
+
+
+def save_calibration_key(tracker, area_width, area_height, width, height, name):
+    """Persist the current homography, cutout, and capture settings by name."""
+    payload = tracker.export_calibration()
+    if payload is None:
+        return "Calibration is not ready to save yet", None, None
+    payload["drawing_area"] = [area_width, area_height]
+    payload["resolution"] = [width, height]
+    try:
+        normalized = marker_tracking.normalize_calibration(payload)
+        destination = calibration_store.save(name, payload)
+    except (OSError, ValueError) as exc:
+        return f"Could not save calibration: {exc}", None, None
+    return (
+        f"Calibration saved as '{name}' to {destination}",
+        name,
+        normalized,
+    )
+
+
+def load_calibration_key(tracker, resolution=None):
+    """Pick a saved calibration from the catalog and restore it."""
+    try:
+        names = calibration_store.names()
+    except (OSError, ValueError) as exc:
+        return f"Could not read saved calibrations: {exc}", None, None
+    if not names:
+        return "No saved calibrations found", None, None
+    try:
+        last = calibration_store.last_name()
+    except (OSError, ValueError):
+        last = None
+    name = prompt_calibration_name(
+        names,
+        default_name=last,
+        none_label="Cancel",
+    )
+    if name is None:
+        return "Load cancelled", None, None
+    try:
+        normalized = marker_tracking.normalize_calibration(
+            calibration_store.load(name)
+        )
+    except (OSError, ValueError, TypeError) as exc:
+        return f"Could not load saved calibration '{name}': {exc}", None, None
+    saved_resolution = normalized["resolution"]
+    if (
+        resolution is not None
+        and saved_resolution is not None
+        and saved_resolution != tuple(resolution)
+    ):
+        return (
+            "Saved calibration uses a different camera resolution; "
+            "restart to apply it",
+            None,
+            None,
+        )
+    try:
+        tracker.import_calibration(normalized)
+    except (ValueError, TypeError) as exc:
+        return f"Could not load saved calibration '{name}': {exc}", None, None
+    try:
+        calibration_store.mark_used(name)
+    except OSError:
+        pass
+    return (
+        f"Loaded saved calibration '{name}': homography and cutout locked; "
+        "press R to recalibrate",
+        name,
+        normalized,
+    )
 
 
 def open_stream(stream_url):
@@ -202,9 +382,9 @@ def draw_tracking_status(frame, result, homography=None):
             for marker_id in sorted(result.reliability)
         ),
         (
-            "Calibration: LOCKED (press R to recalibrate)"
+            "Calibration: LOCKED (S save, L load, R recalibrate)"
             if getattr(result, "calibration_confirmed", False)
-            else "Calibration: PROVISIONAL - press C to confirm"
+            else "Calibration: PROVISIONAL - C confirm, S save"
             if result.calibrated
             else "Calibration observations: "
             + " ".join(
@@ -290,11 +470,19 @@ def prepare_display_frame(frame, result, show_full_frame, pose=None):
 
 
 def main():
-    area_width, area_height = choose_drawing_dimensions()
-    output_size = marker_tracking.output_size_for_area(
-        area_width,
-        area_height,
-    )
+    startup = choose_startup_calibration()
+    if startup is not None:
+        calibration_name, calibration = startup
+        area_width, area_height = calibration["drawing_area"]
+        output_size = calibration["output_size"]
+    else:
+        calibration_name = None
+        calibration = None
+        area_width, area_height = choose_drawing_dimensions()
+        output_size = marker_tracking.output_size_for_area(
+            area_width,
+            area_height,
+        )
     print(
         f"Drawing-area aspect ratio: {area_width:g}x{area_height:g}; "
         f"corrected area size: {output_size[0]}x{output_size[1]} pixels "
@@ -303,20 +491,29 @@ def main():
     cameras = camera_select.get_cameras()
     camera = camera_select.choose_starting_camera(cameras)
     resolutions = camera_select.choose_resolution_steps(camera)
-    resolution_index = choose_starting_resolution(resolutions)
+    if calibration is not None:
+        saved_resolution = calibration.get("resolution")
+        if saved_resolution in resolutions:
+            resolution_index = resolutions.index(saved_resolution)
+            print(
+                f"Using saved camera resolution {saved_resolution[0]}x"
+                f"{saved_resolution[1]}"
+            )
+        else:
+            print("Saved calibration resolution is unavailable; recalibrating")
+            calibration_name = None
+            calibration = None
+    if calibration is None:
+        resolution_index = choose_starting_resolution(resolutions)
     width, height = resolutions[resolution_index]
     fps_index = 0
     requested_fps = FPS_LEVELS[fps_index]
 
     detector = marker_tracking.ArucoMarkerDetector()
-    tracker = marker_tracking.MarkerTracker(output_size=output_size)
-    pose = pose_estimator.PoseEstimator(
-        pose_estimator.PoseEstimatorConfig(
-            drawing_width_mm=area_width,
-            drawing_height_mm=area_height,
-            output_size=output_size,
-        )
-    )
+    tracker = make_tracker(output_size, calibration)
+    if calibration is not None:
+        print("Loaded saved homography and cutout (locked); press R to recalibrate")
+    pose = make_pose_estimator(area_width, area_height, output_size)
     stream_url = camera_select.stream_url(camera, width, height, requested_fps)
     print(
         f"Selected camera {camera['id']} "
@@ -343,7 +540,13 @@ def main():
                 print("Couldn't read stream; reconnecting...")
                 cap.release()
                 cap = open_stream(stream_url)
-                tracker = marker_tracking.MarkerTracker(output_size=output_size)
+                reusable = (
+                    calibration
+                    if calibration is not None
+                    and calibration.get("resolution") == (width, height)
+                    else None
+                )
+                tracker = make_tracker(output_size, reusable)
                 pose.reset()
                 frame_times.clear()
                 now = time.monotonic()
@@ -386,7 +589,9 @@ def main():
                         camera, width, height, requested_fps
                     )
                     cap = open_stream(stream_url)
-                    tracker = marker_tracking.MarkerTracker(output_size=output_size)
+                    calibration_name = None
+                    calibration = None
+                    tracker = make_tracker(output_size)
                     pose.reset()
                     frame_times.clear()
                     last_fps_evaluation = time.monotonic()
@@ -437,7 +642,10 @@ def main():
             if show_full_frame or result.calibration is None:
                 view_label = "View: full camera frame"
             elif getattr(result, "calibration_confirmed", False):
-                view_label = "View: calibrated area (locked)"
+                view_label = "View: calibrated area (locked"
+                if calibration_name:
+                    view_label += f": {calibration_name}"
+                view_label += ")"
             else:
                 view_label = "View: calibrated area"
             cv2.putText(
@@ -477,8 +685,44 @@ def main():
                 show_full_frame = not show_full_frame
             if key == ord("c"):
                 print(confirm_calibration_key(tracker))
+            if key == ord("s"):
+                name = prompt_new_calibration_name(calibration_name)
+                message, saved_name, payload = save_calibration_key(
+                    tracker,
+                    area_width,
+                    area_height,
+                    width,
+                    height,
+                    name,
+                )
+                print(message)
+                if payload is not None:
+                    calibration_name = saved_name
+                    calibration = payload
+            if key == ord("l"):
+                message, loaded_name, payload = load_calibration_key(
+                    tracker, (width, height)
+                )
+                print(message)
+                if payload is not None:
+                    saved_area = payload["drawing_area"]
+                    if (
+                        saved_area != (area_width, area_height)
+                        or payload["output_size"] != output_size
+                    ):
+                        area_width, area_height = saved_area
+                        output_size = payload["output_size"]
+                        pose = make_pose_estimator(
+                            area_width, area_height, output_size
+                        )
+                    calibration_name = loaded_name
+                    calibration = payload
+                    pose.reset()
+                    calibration_started = time.monotonic()
             if key == ord("r"):
-                tracker = marker_tracking.MarkerTracker(output_size=output_size)
+                tracker = make_tracker(output_size)
+                calibration_name = None
+                calibration = None
                 pose.reset()
                 calibration_started = time.monotonic()
                 print(
