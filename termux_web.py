@@ -29,6 +29,7 @@ button { padding: 8px 12px; margin: 4px 4px 4px 0; background: #0284c7; color: w
 input { padding: 8px; background: #0f172a; color: white; border: 1px solid #475569; border-radius: 6px; }
 .row { margin: 12px 0; }
 #message { color: #38bdf8; min-height: 1.2em; }
+#freshness { font-weight: bold; margin: 8px 0; }
 </style>
 </head>
 <body>
@@ -46,17 +47,32 @@ input { padding: 8px; background: #0f172a; color: white; border: 1px solid #4755
 <button onclick="action('calibration/load', {name: document.getElementById('calName').value})">Load</button>
 </div>
 <div id="message"></div>
+<div id="freshness">no updates</div>
 <h3>Pose</h3><pre id="pose">loading...</pre>
+<h3>Detection</h3><pre id="diagnostics">loading...</pre>
 <h3>Status</h3><pre id="status">loading...</pre>
 <script>
 const fps = {{ fps }};
+function get(path) {
+  return fetch(path + '?t=' + Date.now()).then(r => r.json());
+}
+function markStale(updated) {
+  const el = document.getElementById('freshness');
+  if (!updated) { el.textContent = 'no updates'; return; }
+  const age = Date.now() / 1000 - updated;
+  el.textContent = age > 3 / fps ? 'STALE (' + age.toFixed(1) + 's old)' : 'live (' + age.toFixed(1) + 's ago)';
+}
 function refresh() {
   document.getElementById('frame').src = 'frame.jpg?t=' + Date.now();
-  fetch('api/pose').then(r => r.json()).then(d => {
+  get('api/pose').then(d => {
     document.getElementById('pose').textContent = JSON.stringify(d, null, 2);
   });
-  fetch('api/status').then(r => r.json()).then(d => {
+  get('api/diagnostics').then(d => {
+    document.getElementById('diagnostics').textContent = JSON.stringify(d, null, 2);
+  });
+  get('api/status').then(d => {
     document.getElementById('status').textContent = JSON.stringify(d, null, 2);
+    markStale(d.updated_at);
   });
 }
 function action(path, body) {
@@ -98,6 +114,7 @@ class Processor:
         self.running = True
         self.jpeg = None
         self.snapshot = self._empty_snapshot()
+        self.diagnostics = self._empty_diagnostics()
 
     def _new_tracker(self, calibration=None):
         tracker = marker_tracking.MarkerTracker(output_size=self.output_size)
@@ -132,7 +149,47 @@ class Processor:
             "calibration_pending": False,
             "calibration_confirmed": False,
             "timestamp": None,
+            "updated_at": None,
         }
+
+    def _empty_diagnostics(self):
+        return {
+            "detected_ids": [],
+            "missing_ids": [],
+            "remembered_ids": [],
+            "tracked_ids": [],
+            "calibration_observations": {},
+            "rejected_count": 0,
+            "reliability": {},
+            "calibration_pending": False,
+            "calibration_confirmed": False,
+            "calibrated": False,
+        }
+
+    def _result_diagnostics(self, result):
+        return {
+            "detected_ids": sorted(int(value) for value in result.live),
+            "missing_ids": sorted(int(value) for value in result.missing),
+            "remembered_ids": sorted(int(value) for value in result.remembered),
+            "tracked_ids": sorted(int(value) for value in result.tracked_ids),
+            "calibration_observations": {
+                str(key): int(value)
+                for key, value in result.calibration_observations.items()
+            },
+            "rejected_count": int(result.rejected_count),
+            "reliability": {
+                str(key): float(value) for key, value in result.reliability.items()
+            },
+            "calibration_pending": bool(result.calibration_pending),
+            "calibration_confirmed": bool(result.calibration_confirmed),
+            "calibrated": bool(result.calibrated),
+        }
+
+    def _error_snapshot(self, reason):
+        snapshot = self._empty_snapshot()
+        snapshot["reason"] = reason
+        snapshot["updated_at"] = time.time()
+        return snapshot
 
     def configure_stream(self):
         cameras = camera_select.get_cameras()
@@ -165,6 +222,7 @@ class Processor:
             if not ret or frame is None:
                 with self.state_lock:
                     self.last_error = "camera stream ended"
+                    self.snapshot = self._error_snapshot("stream unavailable")
                 capture.release()
                 time.sleep(min(interval, 1.0))
                 while self.running:
@@ -177,22 +235,32 @@ class Processor:
                         time.sleep(1.0)
                 continue
             now = time.monotonic()
-            with self.action_lock:
-                corners, ids, rejected = self.detector.detect(frame)
-                result = self.tracker.update(
-                    corners, ids, rejected, frame.shape, now=now
-                )
-                estimate = self.pose.update(result, frame=frame, now=now)
-                display = self._display_frame(frame, result)
-                ok, encoded = cv2.imencode(".jpg", display)
-                jpeg = encoded.tobytes() if ok else None
-            self.frame_times.append(now)
-            while self.frame_times and self.frame_times[0] < now - 5.0:
-                self.frame_times.popleft()
-            with self.state_lock:
-                self.jpeg = jpeg
-                self.snapshot = self._pose_snapshot(estimate, result, now)
-                self.last_error = None
+            try:
+                with self.action_lock:
+                    corners, ids, rejected = self.detector.detect(frame)
+                    result = self.tracker.update(
+                        corners, ids, rejected, frame.shape, now=now
+                    )
+                    estimate = self.pose.update(result, frame=frame, now=now)
+                    display = self._display_frame(frame, result)
+                    ok, encoded = cv2.imencode(".jpg", display)
+                    jpeg = encoded.tobytes() if ok else None
+                    diagnostics = self._result_diagnostics(result)
+                self.frame_times.append(now)
+                while self.frame_times and self.frame_times[0] < now - 5.0:
+                    self.frame_times.popleft()
+                with self.state_lock:
+                    self.jpeg = jpeg
+                    self.snapshot = self._pose_snapshot(estimate, result, now)
+                    self.diagnostics = diagnostics
+                    self.last_error = None
+            except Exception as exc:
+                with self.state_lock:
+                    self.last_error = str(exc)
+                    self.snapshot = self._error_snapshot(str(exc))
+                    self.diagnostics = self._empty_diagnostics()
+                time.sleep(interval)
+                continue
             delay = interval - (time.monotonic() - started)
             if delay > 0:
                 time.sleep(delay)
@@ -220,11 +288,19 @@ class Processor:
             "calibration_pending": bool(result.calibration_pending),
             "calibration_confirmed": bool(result.calibration_confirmed),
             "timestamp": now,
+            "updated_at": time.time(),
         }
 
     def pose_json(self):
         with self.state_lock:
             return dict(self.snapshot)
+
+    def diagnostics_json(self):
+        with self.state_lock:
+            data = dict(self.diagnostics)
+            data["last_error"] = self.last_error
+            data["updated_at"] = self.snapshot.get("updated_at")
+            return data
 
     def status_json(self):
         with self.state_lock:
@@ -244,6 +320,7 @@ class Processor:
                 "calibration_name": self.calibration_name,
                 "drawing_area": [self.area_width, self.area_height],
                 "output_size": list(self.output_size),
+                "updated_at": self.snapshot.get("updated_at"),
             }
 
     def frame_bytes(self):
@@ -322,6 +399,12 @@ class Processor:
 def create_app(processor):
     app = Flask(__name__)
 
+    @app.after_request
+    def no_cache(response):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        return response
+
     @app.get("/")
     def index():
         return render_template_string(PAGE, fps=processor.fps)
@@ -340,6 +423,10 @@ def create_app(processor):
     @app.get("/api/status")
     def status():
         return jsonify(processor.status_json())
+
+    @app.get("/api/diagnostics")
+    def diagnostics():
+        return jsonify(processor.diagnostics_json())
 
     @app.get("/api/calibration/names")
     def calibration_names():

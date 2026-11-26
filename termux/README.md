@@ -92,8 +92,14 @@ calibrations, and switching between raw and calibrated views. Calibrations use t
   `reliability`, `predicted`, `prediction_age_seconds`, `inside_drawing_area`,
   `refined`, `fit_error_px`, calibration flags, and timestamp.
 - `GET /api/status` — camera and resolution, target and actual FPS, stream state, last
-  error, view mode, calibration name, drawing area, and output size.
+  error, view mode, calibration name, drawing area, output size, and `updated_at`.
+- `GET /api/diagnostics` — detected/missing/remembered marker IDs, tracked IDs,
+  calibration observation counts, rejected contour count, per-marker reliability,
+  calibration flags, last error, and `updated_at`.
 - `GET /frame.jpg` — latest JPEG snapshot.
+
+All responses send `Cache-Control: no-store`, and the browser cache-busts its API and
+image requests, so the page always shows the current frame and values.
 - `GET /api/calibration/names` — saved calibration names.
 - `POST /api/calibration/confirm`, `/api/calibration/clear`, `/api/calibration/save`
   `{"name": "..."}`, `/api/calibration/load` `{"name": "..."}`.

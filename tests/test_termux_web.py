@@ -29,7 +29,28 @@ class FakeProcessor:
         }
 
     def status_json(self):
-        return {"target_fps": 5.0, "actual_fps": 4.8, "view_mode": "calibrated"}
+        return {
+            "target_fps": 5.0,
+            "actual_fps": 4.8,
+            "view_mode": "calibrated",
+            "updated_at": 1000.0,
+        }
+
+    def diagnostics_json(self):
+        return {
+            "detected_ids": [4],
+            "missing_ids": [],
+            "remembered_ids": [],
+            "tracked_ids": [4],
+            "calibration_observations": {"1": 5, "2": 5, "3": 5},
+            "rejected_count": 2,
+            "reliability": {"4": 0.8},
+            "calibration_pending": False,
+            "calibration_confirmed": True,
+            "calibrated": True,
+            "last_error": None,
+            "updated_at": 1000.0,
+        }
 
     def frame_bytes(self):
         return b"jpeg-bytes"
@@ -66,6 +87,17 @@ class TermuxWebTests(unittest.TestCase):
         self.assertIn("frame.jpg", body)
         self.assertIn("const fps = 5.0;", body)
         self.assertIn("setInterval(refresh, 1000 / fps)", body)
+        self.assertIn("get('api/pose')", body)
+        self.assertIn("get('api/diagnostics')", body)
+        self.assertIn("get('api/status')", body)
+        self.assertIn("?t=' + Date.now()", body)
+        self.assertIn('id="freshness"', body)
+
+    def test_no_cache_headers(self):
+        for path in ("/", "/api/pose", "/api/status", "/api/diagnostics", "/frame.jpg"):
+            response = self.client.get(path)
+            self.assertIn("no-store", response.headers["Cache-Control"])
+            self.assertEqual(response.headers["Pragma"], "no-cache")
 
     def test_pose_api_fields(self):
         data = json.loads(self.client.get("/api/pose").get_data(as_text=True))
@@ -80,6 +112,13 @@ class TermuxWebTests(unittest.TestCase):
         self.assertEqual(status["actual_fps"], 4.8)
         names = json.loads(self.client.get("/api/calibration/names").get_data(as_text=True))
         self.assertEqual(names["names"], ["one", "two"])
+
+    def test_diagnostics_api(self):
+        data = json.loads(self.client.get("/api/diagnostics").get_data(as_text=True))
+        self.assertEqual(data["detected_ids"], [4])
+        self.assertEqual(data["rejected_count"], 2)
+        self.assertEqual(data["calibration_observations"]["1"], 5)
+        self.assertIsNotNone(data["updated_at"])
 
     def test_frame_route(self):
         response = self.client.get("/frame.jpg")
@@ -139,8 +178,33 @@ class TermuxWebTests(unittest.TestCase):
         )
         snapshot = processor._pose_snapshot(estimate, result, 42.0)
         self.assertEqual(snapshot["timestamp"], 42.0)
+        self.assertIsNotNone(snapshot["updated_at"])
         self.assertTrue(snapshot["valid"])
         self.assertTrue(snapshot["calibrated"])
+
+    def test_error_snapshot_and_result_diagnostics(self):
+        processor = termux_web.Processor(400, 300, 5)
+        error_snapshot = processor._error_snapshot("boom")
+        self.assertEqual(error_snapshot["reason"], "boom")
+        self.assertIsNotNone(error_snapshot["updated_at"])
+        result = SimpleNamespace(
+            live={4: object()},
+            missing=(2,),
+            remembered={1: object()},
+            tracked_ids=(1, 2, 4),
+            calibration_observations={1: 3, 2: 4},
+            rejected_count=7,
+            reliability={4: 0.75},
+            calibration_pending=True,
+            calibration_confirmed=False,
+            calibrated=True,
+        )
+        diagnostics = processor._result_diagnostics(result)
+        self.assertEqual(diagnostics["detected_ids"], [4])
+        self.assertEqual(diagnostics["missing_ids"], [2])
+        self.assertEqual(diagnostics["remembered_ids"], [1])
+        self.assertEqual(diagnostics["rejected_count"], 7)
+        self.assertEqual(diagnostics["calibration_observations"]["2"], 4)
 
 
 if __name__ == "__main__":
