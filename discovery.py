@@ -1,8 +1,11 @@
-from zeroconf import Zeroconf, ServiceBrowser
 from threading import Event
 from pathlib import Path
 
+Zeroconf = None
+ServiceBrowser = None
+
 hub_url = "no url"
+static_hub_url = None
 hub_found = Event()
 LAST_HUB_FILE = Path.home() / ".config" / "visiongraph" / "last_hub_url"
 saved_url_selected = False
@@ -17,6 +20,8 @@ def load_last_hub_url():
 
 
 def remember_hub_url(url=None):
+    if static_hub_url:
+        return
     url = url or hub_url
     if not url.startswith(("http://", "https://")):
         return
@@ -24,7 +29,14 @@ def remember_hub_url(url=None):
     LAST_HUB_FILE.write_text(url, encoding="utf-8")
 
 def app_url():
-    return hub_url
+    return static_hub_url or hub_url
+
+def use_static_url(url):
+    global static_hub_url, hub_url
+    if not url.startswith(("http://", "https://")):
+        raise ValueError("CommandHub URL must start with http:// or https://")
+    static_hub_url = url.rstrip("/")
+    hub_url = static_hub_url
 
 class MyListener:
 
@@ -59,7 +71,13 @@ class MyListener:
 
 
 def discover():
-    global hub_url, saved_url_selected
+    global hub_url, saved_url_selected, Zeroconf, ServiceBrowser
+    if static_hub_url:
+        return
+    if Zeroconf is None or ServiceBrowser is None:
+        from zeroconf import Zeroconf as ZeroconfClass, ServiceBrowser as ServiceBrowserClass
+        Zeroconf = ZeroconfClass
+        ServiceBrowser = ServiceBrowserClass
     hub_url = "no url"
     saved_url_selected = False
     hub_found.clear()
@@ -78,6 +96,8 @@ def discover():
 
 def choose_hub():
     global hub_url, saved_url_selected
+    if static_hub_url:
+        return
     saved_url = load_last_hub_url()
     if saved_url:
         hub_url = saved_url

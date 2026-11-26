@@ -135,6 +135,11 @@ The CommandHub URL is discovered over local zeroconf HTTP service discovery or
 loaded from `~/.config/visiongraph/last_hub_url`. This documents the client-side
 contract; the endpoint implementation belongs to the CommandHub project.
 
+## Termux
+
+The `termux/` directory on this branch contains the phone-side setup: SSH server
+instructions and an installer for the Python dependencies. See `termux/README.md`.
+
 ## Status
 
 Early development.
