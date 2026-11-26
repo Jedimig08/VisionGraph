@@ -131,14 +131,14 @@ This client expects CommandHub to expose these HTTP endpoints:
   request when the stream is persistently slow; it keeps the selected
   resolution.
 
-The CommandHub URL is discovered over local zeroconf HTTP service discovery or
-loaded from `~/.config/visiongraph/last_hub_url`. This documents the client-side
-contract; the endpoint implementation belongs to the CommandHub project.
+On this branch the CommandHub URL is fixed to `http://127.0.0.1:8080`, so zeroconf
+is not required. `discovery.use_static_url()` can override it. This documents the
+client-side contract; the endpoint implementation belongs to the CommandHub project.
 
 ## Termux
 
-The `termux/` directory on this branch contains the phone-side setup: SSH server
-instructions and an installer for the Python dependencies. See `termux/README.md`.
+The `termux/` directory contains the phone-side setup: SSH server instructions and an
+installer for the Python dependencies. See `termux/README.md`.
 
 ## Status
 
