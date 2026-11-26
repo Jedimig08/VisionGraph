@@ -138,7 +138,8 @@ client-side contract; the endpoint implementation belongs to the CommandHub proj
 ## Termux
 
 The `termux/` directory contains the phone-side setup: SSH server instructions and an
-installer for the Python dependencies. See `termux/README.md`.
+installer for the Python dependencies. `termux_web.py` serves a low-FPS web viewer with
+plain-text stats and an HTTP API. See `termux/README.md`.
 
 ## Status
 

@@ -69,3 +69,32 @@ The launcher should point at the local processing server (for example
 `http://127.0.0.1:5000/`). Clicking **Launch Processing UI** from a laptop saves the URL
 and opens `http://<phone-ip>:8080/processing-ui/`, where CommandHub proxies the page
 running in Termux. CommandHub's access mode must be `ONLINE` for laptop access.
+
+## 4. Run the web viewer
+
+Only the drawing-area size is required:
+
+```sh
+cd ~/VisionGraph
+python3 termux_web.py --width 600 --height 400 --fps 5
+```
+
+`--fps` is the capture and page refresh rate. Lower it (even below 1) for a lighter
+setup. The server binds `127.0.0.1:5000`; override with `--host` and `--port`. The page
+shows a low-FPS snapshot image, plain-text pose and status blocks, and buttons for
+confirming/locking calibration, clearing/recalibrating, saving and loading named
+calibrations, and switching between raw and calibrated views. Calibrations use the same
+`~/.config/visiongraph/calibrations.json` catalog as the PC client.
+
+## 5. HTTP API
+
+- `GET /api/pose` — `x_mm`, `y_mm`, `angle_deg`, `raw_angle_deg`, `valid`, `reason`,
+  `reliability`, `predicted`, `prediction_age_seconds`, `inside_drawing_area`,
+  `refined`, `fit_error_px`, calibration flags, and timestamp.
+- `GET /api/status` — camera and resolution, target and actual FPS, stream state, last
+  error, view mode, calibration name, drawing area, and output size.
+- `GET /frame.jpg` — latest JPEG snapshot.
+- `GET /api/calibration/names` — saved calibration names.
+- `POST /api/calibration/confirm`, `/api/calibration/clear`, `/api/calibration/save`
+  `{"name": "..."}`, `/api/calibration/load` `{"name": "..."}`.
+- `POST /api/view` `{"mode": "raw"|"calibrated"}`.
