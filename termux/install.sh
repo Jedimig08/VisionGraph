@@ -54,4 +54,14 @@ print("aruco available")
 print("flask", flask.__version__)
 PY
 
+install -m 0755 "$REPO_ROOT/termux/visiongraph-service.sh" "$PREFIX/bin/visiongraph-service"
+mkdir -p "$HOME/.termux/boot" "$HOME/.config/visiongraph"
+install -m 0755 "$REPO_ROOT/termux/boot.sh" "$HOME/.termux/boot/visiongraph"
+CONFIG_FILE="$HOME/.config/visiongraph/termux_service.conf"
+if [ ! -f "$CONFIG_FILE" ]; then
+    printf 'WIDTH=600\nHEIGHT=400\nFPS=2\nHOST=127.0.0.1\nPORT=5000\n' > "$CONFIG_FILE"
+fi
+
 echo "VisionGraph Termux files installed in $TARGET_DIR"
+echo "Boot autostart installed at ~/.termux/boot/visiongraph; install Termux:Boot from F-Droid to use it."
+"$PREFIX/bin/visiongraph-service" start

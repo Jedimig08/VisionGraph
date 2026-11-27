@@ -97,10 +97,34 @@ calibrations, and switching between raw and calibrated views. Calibrations use t
   calibration observation counts, rejected contour count, per-marker reliability,
   calibration flags, last error, and `updated_at`.
 - `GET /frame.jpg` — latest JPEG snapshot.
-
-All responses send `Cache-Control: no-store`, and the browser cache-busts its API and
-image requests, so the page always shows the current frame and values.
 - `GET /api/calibration/names` — saved calibration names.
 - `POST /api/calibration/confirm`, `/api/calibration/clear`, `/api/calibration/save`
   `{"name": "..."}`, `/api/calibration/load` `{"name": "..."}`.
+- `POST /api/view` `{"mode": "raw"|"calibrated"}`.
+
+All responses send `Cache-Control: no-store`, and the browser cache-busts its API and
+image requests, so the page always shows the current frame and values.
+
+## 6. Run as a service and autostart at boot
+
+The installer creates a `visiongraph-service` command and a boot hook. Use it instead
+of launching `termux_web.py` by hand:
+
+```sh
+visiongraph-service start
+visiongraph-service status
+visiongraph-service stop
+visiongraph-service restart
+```
+
+`start` also launches `sshd` if it is not already running, then prints where the viewer
+is available and how to stop it. The viewer PID is kept in
+`~/.config/visiongraph/termux_web.pid` and output in `termux_web.log`. Settings live in
+`~/.config/visiongraph/termux_service.conf` (`WIDTH`, `HEIGHT`, `FPS`, `HOST`, `PORT`);
+edit that file to change the drawing area or FPS without touching the command.
+
+For autostart, install the **Termux:Boot** app from F-Droid and open it once so it can
+register. The installer places a script at `~/.termux/boot/visiongraph` that runs
+`visiongraph-service start` on every boot, starting both the viewer and `sshd`. Without
+Termux:Boot the boot hook will not run; use `visiongraph-service start` manually.
 - `POST /api/view` `{"mode": "raw"|"calibrated"}`.
