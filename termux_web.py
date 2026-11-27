@@ -191,6 +191,9 @@ class Processor:
         snapshot["updated_at"] = time.time()
         return snapshot
 
+    def stream_fps(self):
+        return max(1, int(round(self.fps)))
+
     def configure_stream(self):
         cameras = camera_select.get_cameras()
         self.camera = camera_select.select_camera(cameras)
@@ -203,12 +206,18 @@ class Processor:
             self.camera,
             self.resolution[0],
             self.resolution[1],
-            self.fps,
+            self.stream_fps(),
         )
         return self.stream_url
 
     def open_capture(self):
         capture = cv2.VideoCapture(self.stream_url)
+        timeout_prop = getattr(cv2, "CAP_PROP_OPEN_TIMEOUT_MSEC", None)
+        buffer_prop = getattr(cv2, "CAP_PROP_BUFFERSIZE", None)
+        if timeout_prop is not None:
+            capture.set(timeout_prop, 5000)
+        if buffer_prop is not None:
+            capture.set(buffer_prop, 1)
         if not capture.isOpened():
             capture.release()
             raise RuntimeError(f"could not open stream {self.stream_url}")

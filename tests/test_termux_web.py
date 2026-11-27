@@ -157,6 +157,8 @@ class TermuxWebTests(unittest.TestCase):
     def test_processor_output_size_and_snapshot_schema(self):
         processor = termux_web.Processor(400, 300, 5)
         self.assertEqual(processor.output_size, (1000, 750))
+        self.assertEqual(processor.stream_fps(), 5)
+        self.assertEqual(termux_web.Processor(400, 300, 0.5).stream_fps(), 1)
         estimate = SimpleNamespace(
             valid=True,
             reason="",
