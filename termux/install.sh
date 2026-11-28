@@ -59,7 +59,7 @@ mkdir -p "$HOME/.termux/boot" "$HOME/.config/visiongraph"
 install -m 0755 "$REPO_ROOT/termux/boot.sh" "$HOME/.termux/boot/visiongraph"
 CONFIG_FILE="$HOME/.config/visiongraph/termux_service.conf"
 if [ ! -f "$CONFIG_FILE" ]; then
-    printf 'WIDTH=600\nHEIGHT=400\nFPS=2\nHOST=127.0.0.1\nPORT=5000\n' > "$CONFIG_FILE"
+    printf 'WIDTH=600\nHEIGHT=400\nFPS=2\nCAMERA_ID=\nRES=\nHOST=127.0.0.1\nPORT=5000\n' > "$CONFIG_FILE"
 fi
 
 echo "VisionGraph Termux files installed in $TARGET_DIR"

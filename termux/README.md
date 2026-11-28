@@ -86,6 +86,11 @@ confirming/locking calibration, clearing/recalibrating, saving and loading named
 calibrations, and switching between raw and calibrated views. Calibrations use the same
 `~/.config/visiongraph/calibrations.json` catalog as the PC client.
 
+The **Setup** panel accepts the same choices as `cv_stream.py`: drawing-area width and
+height in mm, a camera, a resolution, and FPS. **Apply & Restart** saves them to the
+service config and restarts the viewer; **Restart** restarts with the saved settings.
+`--camera-id` and `--res WxH` are available when launching by hand.
+
 ## 5. HTTP API
 
 - `GET /api/pose` — `x_mm`, `y_mm`, `angle_deg`, `raw_angle_deg`, `valid`, `reason`,
@@ -101,6 +106,12 @@ calibrations, and switching between raw and calibrated views. Calibrations use t
 - `POST /api/calibration/confirm`, `/api/calibration/clear`, `/api/calibration/save`
   `{"name": "..."}`, `/api/calibration/load` `{"name": "..."}`.
 - `POST /api/view` `{"mode": "raw"|"calibrated"}`.
+- `GET /api/setup` — current drawing area, FPS, camera list with resolutions, and
+  selected camera/resolution.
+- `POST /api/setup`
+  `{"width":600,"height":400,"camera_id":"0","res":"640x480","fps":2}` — validates and
+  saves settings, then restarts the viewer.
+- `POST /api/restart` — restart the viewer with the saved settings.
 
 All responses send `Cache-Control: no-store`, and the browser cache-busts its API and
 image requests, so the page always shows the current frame and values.
@@ -120,11 +131,11 @@ visiongraph-service restart
 `start` also launches `sshd` if it is not already running, then prints where the viewer
 is available and how to stop it. The viewer PID is kept in
 `~/.config/visiongraph/termux_web.pid` and output in `termux_web.log`. Settings live in
-`~/.config/visiongraph/termux_service.conf` (`WIDTH`, `HEIGHT`, `FPS`, `HOST`, `PORT`);
-edit that file to change the drawing area or FPS without touching the command.
+`~/.config/visiongraph/termux_service.conf` (`WIDTH`, `HEIGHT`, `FPS`, `CAMERA_ID`,
+`RES`, `HOST`, `PORT`). Empty `CAMERA_ID` and `RES` mean auto-select; edit the file or
+use the web Setup panel to change them.
 
 For autostart, install the **Termux:Boot** app from F-Droid and open it once so it can
 register. The installer places a script at `~/.termux/boot/visiongraph` that runs
 `visiongraph-service start` on every boot, starting both the viewer and `sshd`. Without
 Termux:Boot the boot hook will not run; use `visiongraph-service start` manually.
-- `POST /api/view` `{"mode": "raw"|"calibrated"}`.

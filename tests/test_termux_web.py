@@ -1,6 +1,9 @@
 import json
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest import mock
 
 import termux_web
 
@@ -73,6 +76,37 @@ class FakeProcessor:
     def set_view(self, mode):
         return {"message": f"view mode set to {mode}"}
 
+    def setup_json(self):
+        return {
+            "width": 600,
+            "height": 400,
+            "fps": 2,
+            "camera_id": "0",
+            "resolution": [640, 480],
+            "cameras": [
+                {
+                    "id": "0",
+                    "facing": "Back",
+                    "type": "Wide",
+                    "resolutions": [[640, 480], [1280, 720]],
+                },
+                {
+                    "id": "2",
+                    "facing": "Back",
+                    "type": "UltraWide",
+                    "resolutions": [[640, 480]],
+                },
+            ],
+        }
+
+    def apply_setup(self, payload):
+        if not payload.get("width"):
+            return {"applied": False, "message": "invalid width"}
+        return {"applied": True, "message": "settings saved; restarting viewer"}
+
+    def restart_service(self):
+        return {"message": "restarting viewer"}
+
 
 class TermuxWebTests(unittest.TestCase):
     def setUp(self):
@@ -112,6 +146,64 @@ class TermuxWebTests(unittest.TestCase):
         self.assertEqual(status["actual_fps"], 4.8)
         names = json.loads(self.client.get("/api/calibration/names").get_data(as_text=True))
         self.assertEqual(names["names"], ["one", "two"])
+
+    def test_setup_panel_and_api(self):
+        body = self.client.get("/").get_data(as_text=True)
+        for needle in ("setupWidth", "setupHeight", "setupCamera", "setupRes", "setupFps", "Apply & Restart", "restartService()"):
+            self.assertIn(needle, body)
+        setup = self.client.get("/api/setup").get_json()
+        self.assertEqual(setup["camera_id"], "0")
+        self.assertEqual(len(setup["cameras"]), 2)
+        bad = self.client.post("/api/setup", json={"width": 0})
+        self.assertEqual(bad.status_code, 400)
+        self.assertFalse(bad.get_json()["applied"])
+        good = self.client.post("/api/setup", json={"width": 600})
+        self.assertEqual(good.status_code, 200)
+        self.assertTrue(good.get_json()["applied"])
+        self.assertEqual(
+            self.client.post("/api/restart").get_json()["message"],
+            "restarting viewer",
+        )
+
+    def test_open_capture_retries_with_backoff(self):
+        processor = termux_web.Processor(400, 300, 5)
+        with (
+            mock.patch.object(
+                processor,
+                "open_capture",
+                side_effect=[RuntimeError("one"), RuntimeError("two"), "capture"],
+            ),
+            mock.patch.object(termux_web.time, "sleep") as sleep,
+        ):
+            self.assertEqual(processor.open_capture_with_retry(), "capture")
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1.0, 2.0])
+
+    def test_configure_stream_uses_overrides(self):
+        cameras = [
+            {"id": "0", "facing": "Back", "type": "Wide", "supportedResolutions": [{"width": 640, "height": 480}]},
+            {"id": "2", "facing": "Back", "type": "UltraWide", "supportedResolutions": [{"width": 1280, "height": 720}]},
+        ]
+        with mock.patch.object(termux_web.camera_select, "get_cameras", return_value=cameras):
+            processor = termux_web.Processor(
+                600, 400, 2, camera_id="2", stream_resolution=(1280, 720)
+            )
+            url = processor.configure_stream()
+        self.assertIn("/stream/2?", url)
+        self.assertIn("res=1280x720", url)
+
+    def test_resolution_parsing_and_config_roundtrip(self):
+        self.assertEqual(termux_web.parse_resolution("640x480"), (640, 480))
+        self.assertIsNone(termux_web.parse_resolution(""))
+        with self.assertRaises(ValueError):
+            termux_web.parse_resolution("abc")
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "termux_service.conf"
+            with mock.patch.object(termux_web, "CONFIG_PATH", path):
+                termux_web.write_config({"WIDTH": "800", "CAMERA_ID": "2"})
+                data = termux_web.read_config()
+            self.assertEqual(data["WIDTH"], "800")
+            self.assertEqual(data["CAMERA_ID"], "2")
+            self.assertEqual(data["HEIGHT"], "400")
 
     def test_diagnostics_api(self):
         data = json.loads(self.client.get("/api/diagnostics").get_data(as_text=True))

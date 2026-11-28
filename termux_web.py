@@ -1,8 +1,10 @@
 import argparse
 import json
+import subprocess
 import threading
 import time
 from collections import deque
+from pathlib import Path
 
 import cv2
 from flask import Flask, Response, jsonify, render_template_string, request
@@ -12,6 +14,64 @@ import camera_select
 import discovery
 import marker_tracking
 import pose_estimator
+
+CONFIG_PATH = Path.home() / ".config" / "visiongraph" / "termux_service.conf"
+CONFIG_DEFAULTS = {
+    "WIDTH": "600",
+    "HEIGHT": "400",
+    "FPS": "2",
+    "CAMERA_ID": "",
+    "RES": "",
+    "HOST": "127.0.0.1",
+    "PORT": "5000",
+}
+
+
+def read_config():
+    values = dict(CONFIG_DEFAULTS)
+    try:
+        lines = CONFIG_PATH.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return values
+    for line in lines:
+        if "=" not in line or line.strip().startswith("#"):
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+
+def write_config(updates):
+    values = read_config()
+    values.update(updates)
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_PATH.write_text(
+        "".join(f"{key}={value}\n" for key, value in values.items()),
+        encoding="utf-8",
+    )
+
+
+def parse_resolution(value):
+    if not value:
+        return None
+    parts = str(value).lower().replace("x", ":").split(":")
+    if len(parts) != 2:
+        raise ValueError("resolution must look like 640x480")
+    width, height = int(parts[0]), int(parts[1])
+    if width <= 0 or height <= 0:
+        raise ValueError("resolution dimensions must be positive")
+    return width, height
+
+
+def trigger_restart():
+    command = "sleep 1; visiongraph-service restart >/dev/null 2>&1"
+    subprocess.Popen(
+        ["/bin/sh", "-c", command],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
 
 PAGE = """
 <!DOCTYPE html>
@@ -35,6 +95,16 @@ input { padding: 8px; background: #0f172a; color: white; border: 1px solid #4755
 <body>
 <h1>VisionGraph Termux</h1>
 <img id="frame" src="frame.jpg" alt="camera">
+<h3>Setup</h3>
+<div class="row">
+<input id="setupWidth" type="number" min="1" step="1" style="width:95px" placeholder="width mm">
+<input id="setupHeight" type="number" min="1" step="1" style="width:95px" placeholder="height mm">
+<select id="setupCamera"></select>
+<select id="setupRes"></select>
+<input id="setupFps" type="number" min="0.2" step="0.1" style="width:80px" placeholder="fps">
+<button onclick="applySetup()">Apply & Restart</button>
+<button onclick="restartService()">Restart</button>
+</div>
 <div class="row">
 <button onclick="action('calibration/confirm', {})">Confirm calibration</button>
 <button onclick="action('calibration/clear', {})">Clear / recalibrate</button>
@@ -53,6 +123,63 @@ input { padding: 8px; background: #0f172a; color: white; border: 1px solid #4755
 <h3>Status</h3><pre id="status">loading...</pre>
 <script>
 const fps = {{ fps }};
+let setupData = null;
+function populateRes() {
+  const camSel = document.getElementById('setupCamera');
+  const resSel = document.getElementById('setupRes');
+  const cam = setupData ? setupData.cameras.find(c => c.id === camSel.value) : null;
+  resSel.innerHTML = '';
+  if (!cam) return;
+  cam.resolutions.forEach(r => {
+    const opt = document.createElement('option');
+    opt.value = r[0] + 'x' + r[1];
+    opt.textContent = r[0] + 'x' + r[1];
+    resSel.appendChild(opt);
+  });
+  const current = camSel.value === setupData.camera_id && setupData.resolution ?
+    setupData.resolution[0] + 'x' + setupData.resolution[1] : '';
+  if (current) resSel.value = current;
+}
+function loadSetup() {
+  get('api/setup').then(d => {
+    setupData = d;
+    document.getElementById('setupWidth').value = d.width;
+    document.getElementById('setupHeight').value = d.height;
+    document.getElementById('setupFps').value = d.fps;
+    const camSel = document.getElementById('setupCamera');
+    camSel.innerHTML = '';
+    d.cameras.forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = c.id + ' ' + (c.facing || '') + ' ' + (c.type || '');
+      camSel.appendChild(opt);
+    });
+    camSel.value = d.camera_id || '';
+    populateRes();
+  });
+}
+function applySetup() {
+  const body = {
+    width: parseFloat(document.getElementById('setupWidth').value),
+    height: parseFloat(document.getElementById('setupHeight').value),
+    camera_id: document.getElementById('setupCamera').value,
+    res: document.getElementById('setupRes').value,
+    fps: parseFloat(document.getElementById('setupFps').value)
+  };
+  fetch('api/setup', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)
+  }).then(r => r.json()).then(d => {
+    document.getElementById('message').textContent = d.message;
+  });
+}
+function restartService() {
+  fetch('api/restart', {method: 'POST'}).then(r => r.json()).then(d => {
+    document.getElementById('message').textContent = d.message;
+  });
+}
+document.getElementById('setupCamera').addEventListener('change', populateRes);
 function get(path) {
   return fetch(path + '?t=' + Date.now()).then(r => r.json());
 }
@@ -85,6 +212,7 @@ function action(path, body) {
     refresh();
   });
 }
+loadSetup();
 refresh();
 setInterval(refresh, 1000 / fps);
 </script>
@@ -94,10 +222,21 @@ setInterval(refresh, 1000 / fps);
 
 
 class Processor:
-    def __init__(self, area_width, area_height, fps, view_mode="calibrated", calibration=None):
+    def __init__(
+        self,
+        area_width,
+        area_height,
+        fps,
+        view_mode="calibrated",
+        calibration=None,
+        camera_id=None,
+        stream_resolution=None,
+    ):
         self.area_width = float(area_width)
         self.area_height = float(area_height)
         self.fps = float(fps)
+        self.camera_id = camera_id
+        self.stream_resolution = stream_resolution
         self.view_mode = view_mode
         self.output_size = marker_tracking.output_size_for_area(self.area_width, self.area_height)
         self.detector = marker_tracking.ArucoMarkerDetector()
@@ -105,6 +244,7 @@ class Processor:
         self.pose = self._new_pose()
         self.calibration_name = None
         self.camera = None
+        self.cameras = []
         self.resolution = None
         self.stream_url = ""
         self.last_error = None
@@ -196,12 +336,22 @@ class Processor:
 
     def configure_stream(self):
         cameras = camera_select.get_cameras()
-        self.camera = camera_select.select_camera(cameras)
-        self.resolution = camera_select.choose_resolution(
-            self.camera,
-            camera_select.MODERATE_WIDTH,
-            camera_select.MODERATE_HEIGHT,
-        )
+        self.cameras = cameras
+        if self.camera_id:
+            matches = [camera for camera in cameras if str(camera.get("id")) == str(self.camera_id)]
+            if not matches:
+                raise RuntimeError(f"camera {self.camera_id} is not available")
+            self.camera = matches[0]
+        else:
+            self.camera = camera_select.select_camera(cameras)
+        if self.stream_resolution:
+            self.resolution = self.stream_resolution
+        else:
+            self.resolution = camera_select.choose_resolution(
+                self.camera,
+                camera_select.MODERATE_WIDTH,
+                camera_select.MODERATE_HEIGHT,
+            )
         self.stream_url = camera_select.stream_url(
             self.camera,
             self.resolution[0],
@@ -223,6 +373,18 @@ class Processor:
             raise RuntimeError(f"could not open stream {self.stream_url}")
         return capture
 
+    def open_capture_with_retry(self):
+        delay = 1.0
+        last_error = None
+        for _ in range(3):
+            try:
+                return self.open_capture()
+            except Exception as exc:
+                last_error = exc
+                time.sleep(delay)
+                delay = min(delay * 2, 4.0)
+        raise last_error
+
     def run(self, capture):
         interval = 1.0 / self.fps
         while self.running:
@@ -234,6 +396,7 @@ class Processor:
                     self.snapshot = self._error_snapshot("stream unavailable")
                 capture.release()
                 time.sleep(min(interval, 1.0))
+                retry_delay = 1.0
                 while self.running:
                     try:
                         capture = self.open_capture()
@@ -241,7 +404,8 @@ class Processor:
                     except Exception as exc:
                         with self.state_lock:
                             self.last_error = str(exc)
-                        time.sleep(1.0)
+                        time.sleep(retry_delay)
+                        retry_delay = min(retry_delay * 2, 30.0)
                 continue
             now = time.monotonic()
             try:
@@ -404,6 +568,63 @@ class Processor:
             self.view_mode = mode
         return {"message": f"view mode set to {mode}"}
 
+    def setup_json(self):
+        with self.state_lock:
+            return {
+                "width": self.area_width,
+                "height": self.area_height,
+                "fps": self.fps,
+                "camera_id": self.camera["id"] if self.camera else None,
+                "resolution": list(self.resolution) if self.resolution else None,
+                "cameras": [
+                    {
+                        "id": str(camera.get("id")),
+                        "facing": camera.get("facing"),
+                        "type": camera.get("type"),
+                        "resolutions": [
+                            [int(res["width"]), int(res["height"])]
+                            for res in camera.get("supportedResolutions", [])
+                        ],
+                    }
+                    for camera in self.cameras
+                ],
+            }
+
+    def apply_setup(self, payload):
+        try:
+            width = float(payload.get("width"))
+            height = float(payload.get("height"))
+            fps = float(payload.get("fps"))
+        except (TypeError, ValueError):
+            return {"applied": False, "message": "width, height and fps must be numbers"}
+        if width <= 0 or height <= 0 or fps <= 0:
+            return {"applied": False, "message": "width, height and fps must be positive"}
+        try:
+            resolution = parse_resolution(payload.get("res"))
+        except (TypeError, ValueError) as exc:
+            return {"applied": False, "message": str(exc)}
+        camera_id = str(payload.get("camera_id") or "").strip()
+        if camera_id and camera_id not in {str(c.get("id")) for c in self.cameras}:
+            return {"applied": False, "message": f"camera {camera_id} is not available"}
+        try:
+            write_config(
+                {
+                    "WIDTH": f"{width:g}",
+                    "HEIGHT": f"{height:g}",
+                    "FPS": f"{fps:g}",
+                    "CAMERA_ID": camera_id,
+                    "RES": f"{resolution[0]}x{resolution[1]}" if resolution else "",
+                }
+            )
+        except OSError as exc:
+            return {"applied": False, "message": f"could not write config: {exc}"}
+        trigger_restart()
+        return {"applied": True, "message": "settings saved; restarting viewer"}
+
+    def restart_service(self):
+        trigger_restart()
+        return {"message": "restarting viewer"}
+
 
 def create_app(processor):
     app = Flask(__name__)
@@ -436,6 +657,20 @@ def create_app(processor):
     @app.get("/api/diagnostics")
     def diagnostics():
         return jsonify(processor.diagnostics_json())
+
+    @app.get("/api/setup")
+    def setup():
+        return jsonify(processor.setup_json())
+
+    @app.post("/api/setup")
+    def apply_setup():
+        payload = request.get_json(silent=True) or {}
+        result = processor.apply_setup(payload)
+        return jsonify(result), 200 if result.get("applied") else 400
+
+    @app.post("/api/restart")
+    def restart():
+        return jsonify(processor.restart_service())
 
     @app.get("/api/calibration/names")
     def calibration_names():
@@ -476,17 +711,29 @@ def main():
     parser.add_argument("--width", type=float, required=True)
     parser.add_argument("--height", type=float, required=True)
     parser.add_argument("--fps", type=float, default=5.0)
+    parser.add_argument("--camera-id", default=None)
+    parser.add_argument("--res", default=None)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5000)
     args = parser.parse_args()
 
     if args.fps <= 0:
         parser.error("fps must be positive")
+    try:
+        stream_resolution = parse_resolution(args.res)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     discovery.use_static_url("http://127.0.0.1:8080")
-    processor = Processor(args.width, args.height, args.fps)
+    processor = Processor(
+        args.width,
+        args.height,
+        args.fps,
+        camera_id=args.camera_id,
+        stream_resolution=stream_resolution,
+    )
     processor.configure_stream()
-    capture = processor.open_capture()
+    capture = processor.open_capture_with_retry()
     thread = threading.Thread(target=processor.run, args=(capture,), daemon=True)
     thread.start()
     create_app(processor).run(host=args.host, port=args.port, threaded=True)

@@ -11,6 +11,8 @@ load_config() {
     WIDTH=600
     HEIGHT=400
     FPS=2
+    CAMERA_ID=
+    RES=
     HOST=127.0.0.1
     PORT=5000
     if [ -f "$CONFIG_FILE" ]; then
@@ -45,7 +47,14 @@ start_viewer() {
     fi
     mkdir -p "$CONFIG_DIR"
     cd "$APP_DIR"
-    setsid python3 termux_web.py --width "$WIDTH" --height "$HEIGHT" --fps "$FPS" --host "$HOST" --port "$PORT" >>"$LOG_FILE" 2>&1 < /dev/null &
+    extra_args=""
+    if [ -n "$CAMERA_ID" ]; then
+        extra_args="$extra_args --camera-id $CAMERA_ID"
+    fi
+    if [ -n "$RES" ]; then
+        extra_args="$extra_args --res $RES"
+    fi
+    setsid python3 termux_web.py --width "$WIDTH" --height "$HEIGHT" --fps "$FPS" $extra_args --host "$HOST" --port "$PORT" >>"$LOG_FILE" 2>&1 < /dev/null &
     pid=$!
     echo "$pid" > "$PID_FILE"
     ready=0
