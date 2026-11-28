@@ -13,6 +13,7 @@ import calibration_store
 import camera_select
 import marker_tracking
 import pose_estimator
+import setup_config
 
 os.environ["QT_QPA_FONTDIR"] = "/usr/share/fonts"
 
@@ -62,10 +63,13 @@ def choose_drawing_dimensions():
             except ValueError:
                 print("Enter a positive number.")
                 continue
-            if math.isfinite(value) and value > 0:
-                dimensions.append(value)
-                break
-            print("Enter a finite positive number.")
+            try:
+                setup_config.validate_dimensions(value, value)
+            except ValueError:
+                print("Enter a finite positive number.")
+                continue
+            dimensions.append(value)
+            break
 
     return tuple(dimensions)
 
@@ -479,7 +483,7 @@ def main():
         calibration_name = None
         calibration = None
         area_width, area_height = choose_drawing_dimensions()
-        output_size = marker_tracking.output_size_for_area(
+        output_size = setup_config.output_size_for_area(
             area_width,
             area_height,
         )
@@ -489,7 +493,10 @@ def main():
         "(longest edge 1000 pixels)"
     )
     cameras = camera_select.get_cameras()
-    camera = camera_select.choose_starting_camera(cameras)
+    camera = camera_select.choose_starting_camera(
+        cameras,
+        default_camera=setup_config.select_camera(cameras),
+    )
     resolutions = camera_select.choose_resolution_steps(camera)
     if calibration is not None:
         saved_resolution = calibration.get("resolution")

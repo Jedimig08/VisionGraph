@@ -95,12 +95,12 @@ def select_camera(cameras=None):
     return max(cameras, key=score_camera)
 
 
-def choose_starting_camera(cameras):
+def choose_starting_camera(cameras, default_camera=None):
     """Prompt for a camera, defaulting to the highest-scoring camera."""
     if not cameras:
         raise RuntimeError("CommandHub reported no cameras")
 
-    default_camera = select_camera(cameras)
+    default_camera = default_camera or select_camera(cameras)
     print("Available cameras:")
     for index, camera in enumerate(cameras, start=1):
         details = " ".join(
