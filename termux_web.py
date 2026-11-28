@@ -14,6 +14,7 @@ import camera_select
 import discovery
 import marker_tracking
 import pose_estimator
+import setup_config
 
 CONFIG_PATH = Path.home() / ".config" / "visiongraph" / "termux_service.conf"
 CONFIG_DEFAULTS = {
@@ -52,15 +53,7 @@ def write_config(updates):
 
 
 def parse_resolution(value):
-    if not value:
-        return None
-    parts = str(value).lower().replace("x", ":").split(":")
-    if len(parts) != 2:
-        raise ValueError("resolution must look like 640x480")
-    width, height = int(parts[0]), int(parts[1])
-    if width <= 0 or height <= 0:
-        raise ValueError("resolution dimensions must be positive")
-    return width, height
+    return setup_config.parse_resolution(value)
 
 
 def trigger_restart():
@@ -238,7 +231,7 @@ class Processor:
         self.camera_id = camera_id
         self.stream_resolution = stream_resolution
         self.view_mode = view_mode
-        self.output_size = marker_tracking.output_size_for_area(self.area_width, self.area_height)
+        self.output_size = setup_config.output_size_for_area(self.area_width, self.area_height)
         self.detector = marker_tracking.ArucoMarkerDetector()
         self.tracker = self._new_tracker(calibration)
         self.pose = self._new_pose()
@@ -337,21 +330,8 @@ class Processor:
     def configure_stream(self):
         cameras = camera_select.get_cameras()
         self.cameras = cameras
-        if self.camera_id:
-            matches = [camera for camera in cameras if str(camera.get("id")) == str(self.camera_id)]
-            if not matches:
-                raise RuntimeError(f"camera {self.camera_id} is not available")
-            self.camera = matches[0]
-        else:
-            self.camera = camera_select.select_camera(cameras)
-        if self.stream_resolution:
-            self.resolution = self.stream_resolution
-        else:
-            self.resolution = camera_select.choose_resolution(
-                self.camera,
-                camera_select.MODERATE_WIDTH,
-                camera_select.MODERATE_HEIGHT,
-            )
+        self.camera = setup_config.select_camera(cameras, self.camera_id)
+        self.resolution = setup_config.select_resolution(self.camera, self.stream_resolution)
         self.stream_url = camera_select.stream_url(
             self.camera,
             self.resolution[0],
@@ -592,15 +572,16 @@ class Processor:
 
     def apply_setup(self, payload):
         try:
-            width = float(payload.get("width"))
-            height = float(payload.get("height"))
+            width, height = setup_config.validate_dimensions(
+                payload.get("width"), payload.get("height")
+            )
             fps = float(payload.get("fps"))
-        except (TypeError, ValueError):
-            return {"applied": False, "message": "width, height and fps must be numbers"}
-        if width <= 0 or height <= 0 or fps <= 0:
-            return {"applied": False, "message": "width, height and fps must be positive"}
+        except (TypeError, ValueError) as exc:
+            return {"applied": False, "message": str(exc)}
+        if fps <= 0:
+            return {"applied": False, "message": "fps must be positive"}
         try:
-            resolution = parse_resolution(payload.get("res"))
+            resolution = setup_config.parse_resolution(payload.get("res"))
         except (TypeError, ValueError) as exc:
             return {"applied": False, "message": str(exc)}
         camera_id = str(payload.get("camera_id") or "").strip()
@@ -613,7 +594,7 @@ class Processor:
                     "HEIGHT": f"{height:g}",
                     "FPS": f"{fps:g}",
                     "CAMERA_ID": camera_id,
-                    "RES": f"{resolution[0]}x{resolution[1]}" if resolution else "",
+                    "RES": setup_config.format_resolution(resolution),
                 }
             )
         except OSError as exc:
